@@ -200,6 +200,8 @@
 <div id="app">
   <nav class="side">
     <div class="brand"><span class="dot"></span>Ардон Аква</div>
+    <button class="nav-btn" data-sec="plots"><span class="ic">&#128506;</span>Участки</button>
+    <div style="padding:2px 10px 14px; font-size:11.5px; color:var(--ink-dim); line-height:1.4;">Участок:<br><b id="currentPlotName" style="color:var(--ink); font-size:12.5px;">—</b></div>
     <button class="nav-btn active" data-sec="dash"><span class="ic">&#9673;</span>Дашборд</button>
     <div class="sec-label">Журналы</div>
     <button class="nav-btn" data-sec="stocking"><span class="ic">&#127793;</span>Зарыбление</button>
@@ -239,13 +241,14 @@
    сумм кормления, среднесуточного О2, сводной таблицы и графиков.
    ========================================================================= */
 
-const POOLS = ["1","2","3","4","5","6","7","8","9","10","ЗБ"];
+const LEGACY_POOLS = ["1","2","3","4","5","6","7","8","9","10","ЗБ"];
+let POOLS = LEGACY_POOLS; // переопределяется под текущий выбранный участок, см. syncPoolsFromPlot()
 const SITES = ["Ардон","Уровень воды Ардон","Инкубатор Ардон","Дарг-Кох"];
 const O2_WARN = 6, O2_BAD = 5;
 const OUT = "OUT"; // виртуальный "бассейн" для продажи/выбытия при пересадке
 function toPoolLabel(v){ return v===OUT ? "Продажа/выбытие" : poolLabel(v); }
 
-function poolLabel(p){ return p==="ЗБ" ? "ЗБ" : "Б"+p; }
+function poolLabel(p){ if(p==="ЗБ") return "ЗБ"; if(/^\d+$/.test(String(p))) return "Б"+p; return String(p); }
 function todayISO(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function fmtD(iso){ if(!iso) return "—"; const [y,m,d]=iso.split("-"); return `${d}.${m}.${y}`; }
 function num(v, d=0){ const n = Number(v); return Number.isFinite(n) ? n : d; }
@@ -265,7 +268,7 @@ function poolPalette(pool){
 let db = null;
 let dbAvailable = false;
 let downloadsCap = null;
-const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{} };
+const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{} };
 const memWatchers = {};
 
 function memNotify(col){ (memWatchers[col]||[]).forEach(fn=>fn()); }
@@ -278,6 +281,7 @@ const Store = {
       snap.docs.forEach(d=>{ out[d.id] = d.data(); });
       return out;
     }
+    mem[col] = mem[col] || {};
     return {...mem[col]};
   },
   watchCollection(col, cb){
@@ -288,6 +292,7 @@ const Store = {
         cb(out);
       }, err=>{ console.warn("db watch error", col, err); });
     }
+    mem[col] = mem[col] || {};
     memWatchers[col] = memWatchers[col] || [];
     const fn = ()=> cb({...mem[col]});
     memWatchers[col].push(fn);
@@ -296,7 +301,7 @@ const Store = {
   },
   async setDoc(col, id, data){
     if(db){ await db.doc(col+"/"+id).set(data); }
-    else{ mem[col][id] = JSON.parse(JSON.stringify(data)); memNotify(col); }
+    else{ mem[col] = mem[col] || {}; mem[col][id] = JSON.parse(JSON.stringify(data)); memNotify(col); }
   },
   async addDoc(col, data){
     const id = uid();
@@ -305,15 +310,91 @@ const Store = {
   },
   async deleteDoc(col, id){
     if(db){ await db.doc(col+"/"+id).delete(); }
-    else{ delete mem[col][id]; memNotify(col); }
+    else{ mem[col] = mem[col] || {}; delete mem[col][id]; memNotify(col); }
   }
 };
+
+/* ---------------------------------------------------------------------
+   Участки — у каждого участка свой независимый набор бассейнов и свой
+   набор журналов (Зарыбление, Пересадки, Отход, ЧП, Кормление, Навески,
+   О2, Температура, Обработки): их данные хранятся в отдельных коллекциях
+   вида "<раздел>__<idУчастка>". Первый, «основной» участок — legacy —
+   продолжает использовать исходные коллекции без суффикса, поэтому все
+   уже внесённые данные остаются на месте без какой-либо миграции.
+   Справочник кормов, пользователи и архив изменений — общие на всё
+   хозяйство, отдельно по участкам не делятся.
+   ------------------------------------------------------------------- */
+const PLOT_SCOPED_COLLECTIONS = ["stocking","mortality","feed","o2","temperature","treatments","transfers","incidents","naveski"];
+const LEGACY_PLOT_ID = "legacy";
+let currentPlotId = null;
+let plotUnsubs = [];
+let plotsBooted = false;
+let seedingDefaultPlot = false;
+
+function plotColName(base){
+  return (currentPlotId && currentPlotId !== LEGACY_PLOT_ID) ? base + "__" + currentPlotId : base;
+}
+function currentPlot(){ return state.plots[currentPlotId] || null; }
+
+function syncPoolsFromPlot(){
+  const plot = currentPlot();
+  POOLS = (plot && Array.isArray(plot.pools)) ? plot.pools : LEGACY_POOLS;
+  const nameEl = document.getElementById("currentPlotName");
+  if(nameEl) nameEl.textContent = plot ? plot.name : "—";
+}
+
+function subscribePlotCollections(){
+  plotUnsubs.forEach(u=>{ try{ u(); }catch(err){} });
+  plotUnsubs = [];
+  PLOT_SCOPED_COLLECTIONS.forEach(col=>{
+    state[col] = {};
+    const unsub = Store.watchCollection(plotColName(col), data=>{ state[col]=data; scheduleRender(); });
+    plotUnsubs.push(unsub);
+  });
+}
+
+function switchPlot(id){
+  if(!state.plots[id] || id === currentPlotId) return;
+  currentPlotId = id;
+  try{ localStorage.setItem("aa_plot", id); }catch(err){}
+  subscribePlotCollections();
+  syncPoolsFromPlot();
+  activeSection = "dash";
+  document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active", b.dataset.sec==="dash"));
+  renderActive();
+  toast("Открыт участок «"+state.plots[id].name+"»");
+}
+
+async function onPlotsChanged(data){
+  state.plots = data;
+  if(!Object.keys(data).length && !seedingDefaultPlot){
+    seedingDefaultPlot = true;
+    try{
+      await Store.setDoc("plots", LEGACY_PLOT_ID, { name:"Ардон", pools: LEGACY_POOLS, legacy:true, order:0, createdAt: Date.now() });
+    }catch(err){ console.warn("failed to seed default plot", err); }
+    seedingDefaultPlot = false;
+    return; // дождёмся следующего снимка с только что созданным участком
+  }
+  if(!plotsBooted){
+    plotsBooted = true;
+    let saved = null;
+    try{ saved = localStorage.getItem("aa_plot"); }catch(err){}
+    currentPlotId = (saved && state.plots[saved]) ? saved : (state.plots[LEGACY_PLOT_ID] ? LEGACY_PLOT_ID : Object.keys(state.plots)[0]);
+    subscribePlotCollections();
+  } else if(!state.plots[currentPlotId]){
+    // текущий участок удалили — переключаемся на основной / первый доступный
+    currentPlotId = state.plots[LEGACY_PLOT_ID] ? LEGACY_PLOT_ID : Object.keys(state.plots)[0];
+    subscribePlotCollections();
+  }
+  syncPoolsFromPlot();
+  scheduleRender();
+}
 
 /* ---------------------------------------------------------------------
    Live state, kept in sync by the watchers below.
    ------------------------------------------------------------------- */
 const state = {
-  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}
+  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}
 };
 let renderQueued = false;
 function scheduleRender(){
@@ -323,9 +404,12 @@ function scheduleRender(){
 }
 
 function initStore(){
-  ["stocking","mortality","feed","o2","temperature","treatments","catalog","archive","transfers","incidents","naveski","users"].forEach(col=>{
+  // Общие на всё хозяйство коллекции — не зависят от выбранного участка.
+  ["catalog","archive","users"].forEach(col=>{
     Store.watchCollection(col, data=>{ state[col]=data; scheduleRender(); });
   });
+  // Участки и, следом за ними, их собственные журналы (см. onPlotsChanged).
+  Store.watchCollection("plots", onPlotsChanged);
 }
 
 /* ---------------------------------------------------------------------
@@ -593,9 +677,11 @@ const SECTION_NAMES = {
 async function archiveSnapshot(col, docId, oldData, action){
   if(!oldData) return;
   try{
+    const plot = currentPlot();
     await Store.addDoc("archive", {
       section: col, docId, date: oldData.date || docId,
-      action, snapshot: oldData, archivedAt: Date.now()
+      action, snapshot: oldData, archivedAt: Date.now(),
+      plotId: currentPlotId || LEGACY_PLOT_ID, plotName: plot ? plot.name : "Ардон"
     });
   }catch(err){ console.warn("archive failed", err); }
 }
@@ -644,7 +730,7 @@ function formatSnapshot(col, data){
 /* ---------------------------------------------------------------------
    Shell / navigation
    ------------------------------------------------------------------- */
-const SECTIONS = ["dash","stocking","transfers","mortality","incidents","feed","naveski","o2","temp","treat","population","summary","charts","catalog","archive","help"];
+const SECTIONS = ["plots","dash","stocking","transfers","mortality","incidents","feed","naveski","o2","temp","treat","population","summary","charts","catalog","archive","help"];
 let activeSection = "dash";
 document.querySelectorAll(".nav-btn").forEach(btn=>{
   btn.addEventListener("click", ()=>{
@@ -667,11 +753,22 @@ function renderActive(){
   if(appEl) appEl.classList.remove("logged-out");
   updateNavUser();
   const renderers = {
-    dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
+    plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
     summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, help: renderHelp
   };
-  main.innerHTML = renderers[activeSection] ? renderers[activeSection]() : "";
+  const needsPools = ["stocking","transfers","mortality","incidents","feed","naveski","o2","treat"].includes(activeSection);
+  if(needsPools && POOLS.length === 0){
+    const titles = {stocking:"Зарыбление", transfers:"Пересадки", mortality:"Отход", incidents:"ЧП", feed:"Кормление", naveski:"Навески", o2:"Кислород О2", treat:"Обработки"};
+    main.innerHTML = topbar(titles[activeSection]||"", "") +
+      `<div class="panel"><div class="panel-body">
+        <div class="alert warn">В участке «${currentPlot()?currentPlot().name:"—"}» пока не добавлено ни одного бассейна.
+        Откройте раздел «Участки» и добавьте хотя бы один бассейн, чтобы начать здесь работу.</div>
+        <button class="btn" style="margin-top:12px;" data-goto-plots="1">Перейти в «Участки»</button>
+      </div></div>`;
+  } else {
+    main.innerHTML = renderers[activeSection] ? renderers[activeSection]() : "";
+  }
   wireActiveSection();
 }
 
@@ -683,6 +780,54 @@ function topbar(title, sub, extra){
       <span class="status-pill ${dbAvailable?'ok':'off'}">${dbAvailable? '&#9679; синхронизировано' : '&#9679; локальный режим (без сохранения)'}</span>
     </div>
   </div>`;
+}
+
+/* ---------------------------------------------------------------------
+   Участки — общая вкладка: список всех участков хозяйства, у каждого
+   свой набор бассейнов и своя копия всех журналов ниже по меню.
+   ------------------------------------------------------------------- */
+function renderPlots(){
+  const rows = Object.entries(state.plots).sort((a,b)=> num(a[1].order) - num(b[1].order) || (a[1].name||"").localeCompare(b[1].name||"", "ru"));
+  const cards = rows.map(([id,p])=>{
+    const isCurrent = id === currentPlotId;
+    const pools = Array.isArray(p.pools) ? p.pools : [];
+    return `<div class="panel" style="${isCurrent?'border-color:var(--accent);':''}">
+      <div class="panel-head">
+        <h2>${p.name||"(без названия)"}${isCurrent?' <span class="tag good" style="margin-left:8px;">текущий</span>':''}</h2>
+        <div class="row" style="gap:8px;">
+          ${!isCurrent?`<button class="btn small" data-plot-switch="${id}">Открыть</button>`:''}
+          <button class="btn ghost small" data-plot-rename="${id}">Переименовать</button>
+          ${id!==LEGACY_PLOT_ID?`<button class="btn danger" data-plot-del="${id}">Удалить</button>`:''}
+        </div>
+      </div>
+      <div class="panel-body">
+        <label>Бассейны (${pools.length})</label>
+        <div class="row" style="gap:6px; margin-bottom:14px; flex-wrap:wrap;">
+          ${pools.length? pools.map(pl=>`<span class="tag muted" style="display:inline-flex; align-items:center; gap:7px; padding:4px 6px 4px 10px;">${poolLabel(pl)}<button class="btn danger" data-pool-del="${id}::${pl}" style="padding:0 6px; font-size:12px; line-height:1.6;" title="Убрать бассейн из участка">×</button></span>`).join("") : `<span class="muted">Бассейнов пока нет</span>`}
+        </div>
+        <div class="row" style="gap:8px; align-items:flex-end;">
+          <div class="field" style="max-width:200px; margin-bottom:0;"><label>Добавить бассейн</label><input type="text" data-pool-input="${id}" placeholder="напр. 11 или ЗБ2"></div>
+          <button class="btn ghost small" data-pool-add="${id}">Добавить</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  return `
+  ${topbar("Участки", "Каждый участок ведёт собственные бассейны и собственную копию всех журналов ниже по меню")}
+  <div class="panel">
+    <div class="panel-head"><h2>Новый участок</h2></div>
+    <div class="panel-body">
+      <form id="plotForm">
+        <div class="row">
+          <div class="field"><label>Название участка</label><input type="text" name="name" placeholder="напр. Дарг-Кох" required></div>
+          <div class="field" style="flex:2;"><label>Бассейны через запятую (необязательно)</label><input type="text" name="pools" placeholder="напр. 1, 2, 3, ЗБ"></div>
+        </div>
+        <button class="btn" type="submit">Создать участок</button>
+      </form>
+    </div>
+  </div>
+  ${cards || `<div class="panel"><div class="panel-body muted">Участков пока нет</div></div>`}`;
 }
 
 /* ---------------------------------------------------------------------
@@ -1958,6 +2103,69 @@ function wireActiveSection(){
       renderActive();
     });
   }
+
+  const gotoPlotsBtn = main.querySelector("[data-goto-plots]");
+  if(gotoPlotsBtn) gotoPlotsBtn.addEventListener("click", ()=>{
+    activeSection = "plots";
+    document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active", b.dataset.sec==="plots"));
+    renderActive();
+  });
+
+  const plotForm = document.getElementById("plotForm");
+  if(plotForm) plotForm.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const f = new FormData(plotForm);
+    const name = (f.get("name")||"").trim();
+    if(!name){ toast("Введите название участка"); return; }
+    const poolsRaw = (f.get("pools")||"").trim();
+    const pools = poolsRaw ? poolsRaw.split(",").map(s=>s.trim()).filter(Boolean) : [];
+    await Store.addDoc("plots", { name, pools, legacy:false, order: Object.keys(state.plots).length, createdAt: Date.now() });
+    plotForm.reset();
+    toast("Участок «"+name+"» создан");
+  });
+
+  main.querySelectorAll("[data-plot-switch]").forEach(b=> b.addEventListener("click", ()=> switchPlot(b.dataset.plotSwitch)));
+
+  main.querySelectorAll("[data-plot-rename]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.plotRename;
+    const plot = state.plots[id]; if(!plot) return;
+    const name = prompt("Новое название участка", plot.name||"");
+    if(!name || !name.trim()) return;
+    await Store.setDoc("plots", id, {...plot, name: name.trim()});
+    toast("Участок переименован");
+  }));
+
+  main.querySelectorAll("[data-plot-del]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.plotDel;
+    if(id === LEGACY_PLOT_ID){ toast("Нельзя удалить основной участок"); return; }
+    if(Object.keys(state.plots).length<=1){ toast("Должен остаться хотя бы один участок"); return; }
+    if(!confirm("Убрать участок из списка? Уже внесённые в нём журналы не удаляются — они станут снова видны, если создать участок заново.")) return;
+    await Store.deleteDoc("plots", id);
+    toast("Участок убран из списка");
+  }));
+
+  main.querySelectorAll("[data-pool-add]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.poolAdd;
+    const input = main.querySelector(`[data-pool-input="${id}"]`);
+    const val = input ? input.value.trim() : "";
+    if(!val){ toast("Введите название бассейна"); return; }
+    const plot = state.plots[id]; if(!plot) return;
+    const pools = Array.isArray(plot.pools) ? [...plot.pools] : [];
+    if(pools.includes(val)){ toast("Такой бассейн уже есть в этом участке"); return; }
+    pools.push(val);
+    await Store.setDoc("plots", id, {...plot, pools});
+    if(input) input.value = "";
+    toast("Бассейн добавлен");
+  }));
+
+  main.querySelectorAll("[data-pool-del]").forEach(b=> b.addEventListener("click", async ()=>{
+    const [id, poolId] = b.dataset.poolDel.split("::");
+    const plot = state.plots[id]; if(!plot) return;
+    if(!confirm(`Убрать бассейн «${poolLabel(poolId)}» из участка «${plot.name}»? Ранее внесённые по нему данные не удаляются, но перестанут быть видны в формах, пока бассейн не будет добавлен обратно.`)) return;
+    const pools = (Array.isArray(plot.pools) ? plot.pools : []).filter(p=>p!==poolId);
+    await Store.setDoc("plots", id, {...plot, pools});
+    toast("Бассейн убран из участка");
+  }));
 
   if(activeSection === "charts") drawCharts();
 }
