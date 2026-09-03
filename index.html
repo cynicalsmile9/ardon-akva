@@ -1174,14 +1174,20 @@ function renderFeed(){
     </div>
   </div>
   <div class="panel">
-    <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней</span>${exportButton("feed")}</div></div>
+    <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней · в ячейках бассейнов: расход / возврат, кг</span>${exportButton("feed")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th><th>Расход, кг (итого)</th><th>Возврат, кг (итого)</th><th>Чистый расход, кг</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th>Расход, итого</th><th>Возврат, итого</th><th>Чистый расход</th><th></th></tr></thead>
       <tbody>${dateList.length? dateList.map(r=>{
         const u = dayTotal(r,"used"), ret = dayTotal(r,"returned");
-        return `<tr><td>${fmtD(r.date)}</td><td class="num">${fmtN(u,1)}</td><td class="num">${fmtN(ret,1)}</td><td class="num"><b>${fmtN(u-ret,1)}</b></td>
+        return `<tr><td>${fmtD(r.date)}</td>
+        ${POOLS.map(p=>{
+          const pu = r.used && r.used[p]!==undefined ? num(r.used[p]) : 0;
+          const pr = r.returned && r.returned[p]!==undefined ? num(r.returned[p]) : 0;
+          return pu||pr ? `<td class="num">${fmtN(pu,1)} / ${fmtN(pr,1)}</td>` : `<td class="num hint">–</td>`;
+        }).join("")}
+        <td class="num">${fmtN(u,1)}</td><td class="num">${fmtN(ret,1)}</td><td class="num"><b>${fmtN(u-ret,1)}</b></td>
         <td><button class="btn ghost small" data-edit-feed="${r.date}">изменить</button> <button class="btn danger" data-del="feed:${r.date}">удалить</button></td></tr>`;
-      }).join("") : `<tr class="empty-row"><td colspan="5">Пока нет записей</td></tr>`}
+      }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+5}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
