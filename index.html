@@ -334,6 +334,9 @@ let seedingDefaultPlot = false;
 function plotColName(base){
   return (currentPlotId && currentPlotId !== LEGACY_PLOT_ID) ? base + "__" + currentPlotId : base;
 }
+function pcol(base){
+  return PLOT_SCOPED_COLLECTIONS.indexOf(base) !== -1 ? plotColName(base) : base;
+}
 function currentPlot(){ return state.plots[currentPlotId] || null; }
 
 function syncPoolsFromPlot(){
@@ -1886,7 +1889,7 @@ function wireActiveSection(){
       const [col,id] = btn.dataset.del.split(":");
       if(!confirm("Удалить запись?")) return;
       const old = state[col] && state[col][id];
-      await Store.deleteDoc(col, id);
+      await Store.deleteDoc(pcol(col), id);
       await archiveSnapshot(col, id, old, "delete");
       toast("Запись удалена");
     });
@@ -1899,7 +1902,7 @@ function wireActiveSection(){
   if(stockingForm) stockingForm.addEventListener("submit", async e=>{
     e.preventDefault();
     const f = new FormData(stockingForm);
-    await Store.addDoc("stocking", {
+    await Store.addDoc(pcol("stocking"), {
       date: f.get("date"), pool: f.get("pool"),
       weight: f.get("weight")? Number(f.get("weight")) : null,
       count: Number(f.get("count")), comment: f.get("comment")||""
@@ -1914,7 +1917,7 @@ function wireActiveSection(){
     const f = new FormData(transferForm);
     const from = f.get("from"), to = f.get("to");
     if(from === to){ toast("«Из» и «в» не могут совпадать"); return; }
-    await Store.addDoc("transfers", {
+    await Store.addDoc(pcol("transfers"), {
       date: f.get("date"), from, to, count: Number(f.get("count")),
       weight: f.get("weight")? Number(f.get("weight")) : null,
       comment: f.get("comment")||""
@@ -1927,7 +1930,7 @@ function wireActiveSection(){
   if(incidentForm) incidentForm.addEventListener("submit", async e=>{
     e.preventDefault();
     const f = new FormData(incidentForm);
-    await Store.addDoc("incidents", {
+    await Store.addDoc(pcol("incidents"), {
       date: f.get("date"), pool: f.get("pool"), count: Number(f.get("count")),
       description: f.get("description")||"", comment: f.get("comment")||""
     });
@@ -1944,7 +1947,7 @@ function wireActiveSection(){
       const date = f.get("date");
       const values = {}; POOLS.forEach(p=> values[p] = num(f.get("p_"+p)));
       const old = state.mortality[date];
-      await Store.setDoc("mortality", date, {date, values});
+      await Store.setDoc(pcol("mortality"), date, {date, values});
       if(old) await archiveSnapshot("mortality", date, old, "edit");
       toast("Отход за "+fmtD(date)+" сохранён");
     });
@@ -1961,7 +1964,7 @@ function wireActiveSection(){
       const used = {}, returned = {};
       POOLS.forEach(p=>{ used[p]=num(f.get("u_"+p)); returned[p]=num(f.get("r_"+p)); });
       const old = state.feed[date];
-      await Store.setDoc("feed", date, {date, used, returned});
+      await Store.setDoc(pcol("feed"), date, {date, used, returned});
       if(old) await archiveSnapshot("feed", date, old, "edit");
       toast("Кормление за "+fmtD(date)+" сохранено");
     });
@@ -1978,7 +1981,7 @@ function wireActiveSection(){
       const values = {};
       POOLS.forEach(p=>{ const v = f.get("p_"+p); if(v!==null && v!=="") values[p] = Number(v); });
       const old = state.naveski[date];
-      await Store.setDoc("naveski", date, {date, values});
+      await Store.setDoc(pcol("naveski"), date, {date, values});
       if(old) await archiveSnapshot("naveski", date, old, "edit");
       toast("Навески за "+fmtD(date)+" сохранены");
     });
@@ -2009,7 +2012,7 @@ function wireActiveSection(){
       POOLS.forEach(p=>{ const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v); });
       const existing = state.o2[date] || {date, entries:[]};
       const entries = [...(existing.entries||[]), {time, values}];
-      await Store.setDoc("o2", date, {date, entries});
+      await Store.setDoc(pcol("o2"), date, {date, entries});
       renderO2._viewDate = date;
       toast("Замер О2 добавлен");
     });
@@ -2019,7 +2022,7 @@ function wireActiveSection(){
       const doc = state.o2[date];
       if(!doc) return;
       const entries = (doc.entries||[]).filter((_,i)=>i!==idx);
-      await Store.setDoc("o2", date, {date, entries});
+      await Store.setDoc(pcol("o2"), date, {date, entries});
       await archiveSnapshot("o2", date, doc, "edit");
       toast("Замер удалён");
     }));
@@ -2034,7 +2037,7 @@ function wireActiveSection(){
       const date = f.get("date");
       const values = {}; SITES.forEach(s=>{ const v=f.get("s_"+s); if(v!==null && v!=="") values[s]=Number(v); });
       const old = state.temperature[date];
-      await Store.setDoc("temperature", date, {date, values});
+      await Store.setDoc(pcol("temperature"), date, {date, values});
       if(old) await archiveSnapshot("temperature", date, old, "edit");
       toast("Температура сохранена");
     });
@@ -2049,7 +2052,7 @@ function wireActiveSection(){
       const date = f.get("date");
       const existing = state.treatments[date] || {date, events:[]};
       const events = [...(existing.events||[]), {pool:f.get("pool"), text:f.get("text")}];
-      await Store.setDoc("treatments", date, {date, events});
+      await Store.setDoc(pcol("treatments"), date, {date, events});
       treatForm.reset();
       toast("Обработка добавлена");
     });
@@ -2059,7 +2062,7 @@ function wireActiveSection(){
       const doc = state.treatments[date];
       if(!doc) return;
       const events = (doc.events||[]).filter((_,i)=>i!==idx);
-      await Store.setDoc("treatments", date, {date, events});
+      await Store.setDoc(pcol("treatments"), date, {date, events});
       await archiveSnapshot("treatments", date, doc, "edit");
       toast("Обработка удалена");
     }));
