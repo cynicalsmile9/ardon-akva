@@ -268,7 +268,7 @@ function poolPalette(pool){
 let db = null;
 let dbAvailable = false;
 let downloadsCap = null;
-const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{} };
+const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{} };
 const memWatchers = {};
 
 function memNotify(col){ (memWatchers[col]||[]).forEach(fn=>fn()); }
@@ -324,7 +324,7 @@ const Store = {
    Справочник кормов, пользователи и архив изменений — общие на всё
    хозяйство, отдельно по участкам не делятся.
    ------------------------------------------------------------------- */
-const PLOT_SCOPED_COLLECTIONS = ["stocking","mortality","feed","o2","temperature","treatments","transfers","incidents","naveski"];
+const PLOT_SCOPED_COLLECTIONS = ["stocking","mortality","feed","o2","temperature","treatments","transfers","incidents","naveski","population"];
 const LEGACY_PLOT_ID = "legacy";
 let currentPlotId = null;
 let plotUnsubs = [];
@@ -346,12 +346,22 @@ function syncPoolsFromPlot(){
   if(nameEl) nameEl.textContent = plot ? plot.name : "—";
 }
 
+/* Служебные записи «корректировка по фактической численности» (corr-*) больше не нужны: численность
+   берётся напрямую из снимков остатка (коллекция population), поэтому
+   в журналах они не показываются и на цифры не влияют. */
+function dropSyntheticDocs(col, data){
+  if(col !== "stocking" && col !== "transfers") return data;
+  const out = {};
+  Object.keys(data).forEach(id=>{ if(id.indexOf("corr-") !== 0) out[id] = data[id]; });
+  return out;
+}
+
 function subscribePlotCollections(){
   plotUnsubs.forEach(u=>{ try{ u(); }catch(err){} });
   plotUnsubs = [];
   PLOT_SCOPED_COLLECTIONS.forEach(col=>{
     state[col] = {};
-    const unsub = Store.watchCollection(plotColName(col), data=>{ state[col]=data; scheduleRender(); });
+    const unsub = Store.watchCollection(plotColName(col), data=>{ state[col]=dropSyntheticDocs(col, data); scheduleRender(); });
     plotUnsubs.push(unsub);
   });
 }
@@ -397,7 +407,7 @@ async function onPlotsChanged(data){
    Live state, kept in sync by the watchers below.
    ------------------------------------------------------------------- */
 const state = {
-  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}
+  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{}
 };
 let renderQueued = false;
 function scheduleRender(){
@@ -531,6 +541,7 @@ function allDates(){
   Object.values(state.stocking).forEach(d=>s.add(d.date));
   Object.values(state.transfers).forEach(d=>s.add(d.date));
   Object.values(state.incidents).forEach(d=>s.add(d.date));
+  Object.values(state.population).forEach(d=>{ if(d && d.date) s.add(d.date); });
   return [...s].sort();
 }
 
@@ -562,6 +573,24 @@ function dayMortTotal(date, incByDate){
 // Cumulative population per pool per date: stocking adds, mortality (журнал +
 // ЧП) subtracts, пересадки move fish from one pool to another (or out, on
 // sale/списание).
+// Снимки фактической численности по дням/бассейнам — первичные, выверенные цифры
+// учёта: в них уже учтены уточнения по фактическим навескам и пересадки,
+// не попавшие в журналы. Где снимок есть — остаток берётся из него как есть.
+function populationSnapshots(){
+  const snaps = {};
+  Object.values(state.population).forEach(d=>{
+    if(!d || !d.date) return;
+    const vals = d.values || {};
+    const row = {};
+    POOLS.forEach(p=>{
+      const v = vals[p];
+      if(v !== undefined && v !== null && v !== "") row[p] = num(v);
+    });
+    snaps[d.date] = row;
+  });
+  return snaps;
+}
+
 function buildPopulation(){
   const dates = allDates();
   const stockByDate = {};
@@ -575,9 +604,14 @@ function buildPopulation(){
     transferByDate[t.date].push(t);
   });
   const incByDate = incidentValuesByDate();
+  const snaps = populationSnapshots();
+  const snapDates = Object.keys(snaps).sort();
+  const lastSnapDate = snapDates.length ? snapDates[snapDates.length-1] : null;
   const running = {}; POOLS.forEach(p=>running[p]=0);
   const started = {}; POOLS.forEach(p=>started[p]=false);
   const byDate = {};
+  let baseSnap = null;   // фактический остаток на дату последнего снимка
+  let baseCalc = null;   // расчётный остаток на ту же дату
   dates.forEach(date=>{
     const sAdd = stockByDate[date] || {};
     const mVals = (state.mortality[date] && state.mortality[date].values) || {};
@@ -592,7 +626,27 @@ function buildPopulation(){
       if(POOLS.includes(t.from)) running[t.from] = Math.max(0, running[t.from] - c);
       if(POOLS.includes(t.to)){ running[t.to] += c; started[t.to] = true; }
     });
-    byDate[date] = {...running};
+    const snap = snaps[date];
+    if(snap){
+      // Есть снимок фактической численности — он и есть остаток на этот день.
+      const row = {};
+      POOLS.forEach(p=>{
+        row[p] = (snap[p] !== undefined) ? snap[p] : 0;
+        if(row[p] > 0) started[p] = true;
+      });
+      byDate[date] = row;
+      if(date === lastSnapDate){ baseSnap = {...row}; baseCalc = {...running}; }
+    } else if(baseSnap && lastSnapDate && date > lastSnapDate){
+      // После последнего снимка ведём остаток от него по журналам.
+      const row = {};
+      POOLS.forEach(p=>{
+        row[p] = Math.max(0, num(baseSnap[p]) + (num(running[p]) - num(baseCalc[p])));
+        if(row[p] > 0) started[p] = true;
+      });
+      byDate[date] = row;
+    } else {
+      byDate[date] = {...running};
+    }
   });
   return { dates, byDate, started };
 }
@@ -1059,7 +1113,7 @@ function renderPopulation(){
   const prevDate = dates.length>1 ? dates[dates.length-2] : null;
   const dateList = [...dates].reverse();
   return `
-  ${topbar("Численность стада", "Остаток рыбы по бассейнам, в штуках — считается автоматически по зарыблению, пересадкам и отходу (включая ЧП)", exportButton("population"))}
+  ${topbar("Численность стада", "Остаток рыбы по бассейнам, в штуках — по фактическим данным учёта; за дни после последнего факта считается по зарыблению, пересадкам и отходу (включая ЧП)", exportButton("population"))}
   <div class="grid cards">
     <div class="card"><div class="label">Стадо, всего</div><div class="value">${fmtN(totalPop)}<small> шт.</small></div><div class="delta">${activePools} бассейнов зарыблено</div></div>
   </div>
