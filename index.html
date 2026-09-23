@@ -219,6 +219,7 @@
     <button class="nav-btn" data-sec="charts"><span class="ic">&#128200;</span>Инфографика</button>
     <button class="nav-btn" data-sec="catalog"><span class="ic">&#128218;</span>Справочник кормов</button>
     <button class="nav-btn" data-sec="archive"><span class="ic">&#128451;</span>Архив изменений</button>
+    <button class="nav-btn" data-sec="users" id="navUsersBtn" style="display:none;"><span class="ic">&#128101;</span>Пользователи</button>
     <div class="sec-label">&nbsp;</div>
     <button class="nav-btn" data-sec="help"><span class="ic">?</span>Инструкция</button>
     <div id="navUser"></div>
@@ -416,9 +417,22 @@ function scheduleRender(){
   requestAnimationFrame(()=>{ renderQueued=false; renderActive(); });
 }
 
+let usersLoaded = false;
+let dataStoreStarted = false;
+
+// До входа приложение подписывается только на список пользователей — этого
+// достаточно, чтобы проверить логин и роль. Сами данные хозяйства
+// запрашиваются лишь после входа аккаунта, которому доступ разрешён, чтобы
+// случайно зарегистрировавшийся человек их даже не получал.
 function initStore(){
+  Store.watchCollection("users", data=>{ state.users = data; usersLoaded = true; scheduleRender(); });
+}
+
+function startDataStore(){
+  if(dataStoreStarted) return;
+  dataStoreStarted = true;
   // Общие на всё хозяйство коллекции — не зависят от выбранного участка.
-  ["catalog","archive","users"].forEach(col=>{
+  ["catalog","archive"].forEach(col=>{
     Store.watchCollection(col, data=>{ state[col]=data; scheduleRender(); });
   });
   // Участки и, следом за ними, их собственные журналы (см. onPlotsChanged).
@@ -448,6 +462,36 @@ async function hashPassword(password, saltHex){
 
 function validUsername(u){ return /^[A-Za-zА-Яа-яЁё0-9_.-]{3,32}$/.test(u); }
 
+/* ---------------------------------------------------------------------
+   Роли. admin — полный доступ плюс управление пользователями;
+   user — доступ к данным; pending — аккаунт заведён, но доступ ещё не
+   подтверждён администратором (данные такому аккаунту не показываются и
+   даже не загружаются).
+   ------------------------------------------------------------------- */
+function roleOf(key){
+  const rec = key ? state.users[key] : null;
+  if(!rec) return null;
+  if(rec.role) return rec.role;
+  // Страховка от блокировки: пока администратор не назначен ни одному
+  // аккаунту, им считается самый первый заведённый.
+  const all = Object.entries(state.users);
+  if(!all.some(([,v])=> v && v.role === "admin")){
+    const first = all.slice().sort((a,b)=> num(a[1] && a[1].createdAt) - num(b[1] && b[1].createdAt))[0];
+    if(first && first[0] === key) return "admin";
+  }
+  return "pending";
+}
+function isAdmin(){ return !!currentUser && roleOf(currentUser.key) === "admin"; }
+function hasAccess(){
+  const r = currentUser ? roleOf(currentUser.key) : null;
+  return r === "admin" || r === "user";
+}
+function roleLabel(r){
+  if(r === "admin") return "Администратор";
+  if(r === "user") return "Доступ разрешён";
+  return "Ждёт подтверждения";
+}
+
 async function handleRegister(usernameRaw, password, password2){
   const username = (usernameRaw||"").trim();
   if(!username || !password) return { ok:false, msg:"Заполните имя пользователя и пароль" };
@@ -457,7 +501,8 @@ async function handleRegister(usernameRaw, password, password2){
   const key = username.toLowerCase();
   if(state.users[key]) return { ok:false, msg:"Это имя пользователя уже занято" };
   const { hash, salt } = await hashPassword(password);
-  await Store.setDoc("users", key, { username, hash, salt, createdAt: Date.now() });
+  // Новый аккаунт создаётся без доступа к данным: их открывает администратор.
+  await Store.setDoc("users", key, { username, hash, salt, createdAt: Date.now(), role: "pending" });
   return { ok:true, username, key };
 }
 
@@ -483,7 +528,9 @@ function tryAutoLogin(){
 function logout(){
   currentUser = null;
   try{ localStorage.removeItem("aa_session"); }catch(err){}
-  renderActive();
+  // Перезагружаем страницу, чтобы уже загруженные данные не остались
+  // в памяти вкладки для следующего, кто войдёт с этого же браузера.
+  location.reload();
 }
 
 function updateNavUser(){
@@ -522,6 +569,25 @@ function renderAuthScreen(){
         ${err ? `<div class="auth-error">${err}</div>` : ""}
       </div></div>
       <div class="auth-note">Вход нужен, чтобы к журналу не заходили случайные люди по ссылке. Пароль хранится только в виде хеша, но это лёгкая защита, а не промышленный уровень безопасности.</div>
+    </div>
+  </div>`;
+}
+
+// Экран для аккаунта, которому администратор ещё не открыл доступ.
+function renderPendingScreen(){
+  const name = currentUser ? currentUser.username : "";
+  return `
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div class="brand" style="justify-content:center; padding-bottom:22px;"><span class="dot"></span>Ардон Аква</div>
+      <div class="panel"><div class="panel-body">
+        <h2 style="margin:0 0 10px; font-size:16px;">Доступ не подтверждён</h2>
+        <p style="margin:0 0 16px; color:var(--ink-dim); font-size:13px; line-height:1.6;">
+          Аккаунт <b>${name}</b> создан, но данные хозяйства ему не открыты.
+          Доступ выдаёт администратор — обратитесь к нему.
+        </p>
+        <button class="btn ghost" id="pendingLogoutBtn" style="width:100%;">Выйти</button>
+      </div></div>
     </div>
   </div>`;
 }
@@ -807,12 +873,27 @@ function renderActive(){
     wireActiveSection();
     return;
   }
+  if(!usersLoaded){
+    if(appEl) appEl.classList.add("logged-out");
+    main.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="panel"><div class="panel-body" style="text-align:center; color:var(--ink-dim);">Загрузка…</div></div></div></div>`;
+    return;
+  }
+  if(!hasAccess()){
+    if(appEl) appEl.classList.add("logged-out");
+    main.innerHTML = renderPendingScreen();
+    wireActiveSection();
+    return;
+  }
+  startDataStore();
   if(appEl) appEl.classList.remove("logged-out");
   updateNavUser();
+  const navUsersBtn = document.getElementById("navUsersBtn");
+  if(navUsersBtn) navUsersBtn.style.display = isAdmin() ? "" : "none";
+  if(activeSection === "users" && !isAdmin()) activeSection = "dash";
   const renderers = {
     plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
-    summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, help: renderHelp
+    summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp
   };
   const needsPools = ["stocking","transfers","mortality","incidents","feed","naveski","o2","treat"].includes(activeSection);
   if(needsPools && POOLS.length === 0){
@@ -1861,6 +1942,45 @@ function renderArchive(){
 /* ---------------------------------------------------------------------
    Инструкция
    ------------------------------------------------------------------- */
+/* Управление доступом. Виден только администратору. */
+function renderUsers(){
+  if(!isAdmin()) return `<div class="panel"><div class="panel-body"><div class="alert warn">Раздел доступен только администратору.</div></div></div>`;
+  const meKey = currentUser ? currentUser.key : null;
+  const rows = Object.entries(state.users).sort((a,b)=> num(a[1] && a[1].createdAt) - num(b[1] && b[1].createdAt));
+  const waiting = rows.filter(([key])=> roleOf(key) === "pending").length;
+  return `
+  ${topbar("Пользователи", "Данные хозяйства видят только аккаунты с открытым доступом. Новая регистрация доступа не даёт, пока вы его не выдадите")}
+  <div class="grid cards">
+    <div class="card"><div class="label">Всего аккаунтов</div><div class="value">${rows.length}</div></div>
+    <div class="card"><div class="label">Ждут подтверждения</div><div class="value">${waiting}</div></div>
+  </div>
+  <div class="panel"><div class="panel-head"><h2>Список аккаунтов</h2></div><div class="panel-body">
+    <div class="table-wrap">
+      <table><thead><tr><th>Пользователь</th><th>Доступ</th><th>Зарегистрирован</th><th></th></tr></thead>
+      <tbody>
+      ${rows.map(([key,u])=>{
+        const r = roleOf(key);
+        const me = key === meKey;
+        const created = (u && u.createdAt) ? fmtD(new Date(u.createdAt).toISOString().slice(0,10)) : "—";
+        return `<tr>
+          <td><b>${(u && u.username) || key}</b>${me ? ` <span class="muted">— это вы</span>` : ""}</td>
+          <td>${roleLabel(r)}</td>
+          <td>${created}</td>
+          <td><div class="row" style="gap:6px; justify-content:flex-end; flex-wrap:wrap;">
+            ${me ? `<span class="muted">—</span>` : `
+              ${r !== "user" ? `<button class="btn small" data-user-role="${key}:user">Открыть доступ</button>` : ""}
+              ${r !== "pending" ? `<button class="btn ghost small" data-user-role="${key}:pending">Забрать доступ</button>` : ""}
+              ${r !== "admin" ? `<button class="btn ghost small" data-user-role="${key}:admin">Сделать админом</button>` : ""}
+              <button class="btn ghost small" data-user-del="${key}">Удалить</button>
+            `}
+          </div></td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>
+    </div>
+  </div></div>`;
+}
+
 function renderHelp(){
   return `
   ${topbar("Инструкция", "Как работает автоматизация")}
@@ -1933,15 +2053,48 @@ function wireActiveSection(){
         try{ localStorage.setItem("aa_session", res.key); }catch(err){}
         renderAuthScreen._err = "";
         renderActive();
-        toast("Регистрация выполнена, вы вошли как "+res.username);
+        toast("Аккаунт создан. Доступ к данным открывает администратор");
       }catch(err){ console.error("register failed", err); renderAuthScreen._err = "Не удалось зарегистрироваться, попробуйте ещё раз"; renderActive(); }
       finally{ if(btn) btn.disabled = false; }
     });
     return;
   }
 
+  if(!hasAccess()){
+    const pendingBtn = document.getElementById("pendingLogoutBtn");
+    if(pendingBtn) pendingBtn.addEventListener("click", logout);
+    return;
+  }
+
   main.querySelectorAll("[data-export]").forEach(btn=>{
     btn.addEventListener("click", ()=> handleExport(btn.dataset.export));
+  });
+
+  main.querySelectorAll("[data-user-role]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      if(!isAdmin()) return;
+      const [key, role] = btn.dataset.userRole.split(":");
+      if(!key || key === (currentUser && currentUser.key)) return;
+      if(role === "admin" && !confirm("Сделать этот аккаунт администратором? Он сможет выдавать и забирать доступ у других.")) return;
+      btn.disabled = true;
+      try{
+        await Store.setDoc("users", key, {...(state.users[key]||{}), role});
+        toast(role === "pending" ? "Доступ закрыт" : (role === "admin" ? "Назначен администратором" : "Доступ открыт"));
+      }catch(err){ console.error("role change failed", err); toast("Не удалось изменить доступ"); }
+      finally{ btn.disabled = false; }
+    });
+  });
+
+  main.querySelectorAll("[data-user-del]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      if(!isAdmin()) return;
+      const key = btn.dataset.userDel;
+      if(!key || key === (currentUser && currentUser.key)) return;
+      const u = state.users[key];
+      if(!confirm(`Удалить аккаунт «${(u && u.username) || key}»? Человек сможет зарегистрироваться заново, но доступ снова будет закрыт.`)) return;
+      try{ await Store.deleteDoc("users", key); toast("Аккаунт удалён"); }
+      catch(err){ console.error("user delete failed", err); toast("Не удалось удалить аккаунт"); }
+    });
   });
 
   main.querySelectorAll("[data-del]").forEach(btn=>{
