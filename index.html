@@ -443,10 +443,16 @@ function startUsersStore(){
 async function ensureProfile(){
   if(profileEnsured || !currentUser) return;
   profileEnsured = true;
-  if(state.users[currentUser.key]) return;
+  const rec = state.users[currentUser.key];
   try{
-    await Store.setDoc("users", currentUser.key, { email: currentUser.email || "", role: "pending", createdAt: Date.now() });
-  }catch(err){ console.warn("profile create failed", err); }
+    if(!rec){
+      await Store.setDoc("users", currentUser.key, { email: currentUser.email || "", role: "pending", createdAt: Date.now() });
+    } else if(!rec.email && currentUser.email){
+      // Аккаунт заводили прямо в консоли Firebase — дописываем почту,
+      // чтобы в списке пользователей он был подписан по-человечески.
+      await Store.setDoc("users", currentUser.key, {...rec, email: currentUser.email});
+    }
+  }catch(err){ console.warn("profile sync failed", err); }
 }
 
 function startDataStore(){
