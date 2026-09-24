@@ -1519,7 +1519,7 @@ function renderTemp(){
       <form id="tempForm">
         <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="tempDate" name="date" value="${esc(editDate)}"></div>
         <div class="grid-entry">
-          ${SITES.map(s=>`<div class="cell" style="min-width:150px;"><label>${s}</label><input type="number" step="0.1" name="s_${s}" value="${existing&&existing.values&&existing.values[s]!==undefined?existing.values[s]:''}"></div>`).join("")}
+          ${SITES.map(s=>`<div class="cell" style="min-width:150px;"><label>${s}</label><input type="number" step="0.1" name="s_${s}" value="${existing&&existing.values&&existing.values[s]!==undefined?esc(existing.values[s]):''}"></div>`).join("")}
         </div>
         <button class="btn" type="submit">Сохранить температуру</button>
       </form>
@@ -1567,7 +1567,7 @@ function renderTreat(){
       <table><thead><tr><th>Дата</th><th>Бассейн</th><th>Обработка</th><th></th></tr></thead>
       <tbody>${all.length? all.map(ev=>`
         <tr><td>${fmtD(ev.date)}</td><td>${poolLabel(ev.pool)}</td><td style="text-align:left; white-space:normal;">${esc(ev.text)}</td>
-        <td><button class="btn danger" data-del-treat="${ev.date}:${ev.idx}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="4">Пока нет записей</td></tr>`}
+        <td><button class="btn danger" data-del-treat="${esc(ev.date)}:${ev.idx}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="4">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -1729,8 +1729,8 @@ function renderCharts(){
       <div class="hint" style="margin-bottom:12px;">В журналах есть записи: отход / корм / остаток стада — ${cov.mfMin?`с ${fmtD(cov.mfMin)} по ${fmtD(cov.mfMax)}`:"нет записей"}; кислород (О2) — ${cov.o2Min?`с ${fmtD(cov.o2Min)} по ${fmtD(cov.o2Max)}`:"нет записей"}. Если выбранный период выходит за эти границы, за недостающие дни на графике данных не будет — это значит, что записи туда ещё не внесены.</div>
       <form id="chartsRangeForm">
         <div class="row" style="align-items:flex-end;">
-          <div class="field"><label>С даты</label><input type="date" name="from" value="${from}" min="${min||""}" max="${max||""}"></div>
-          <div class="field"><label>По дату</label><input type="date" name="to" value="${to}" min="${min||""}" max="${max||""}"></div>
+          <div class="field"><label>С даты</label><input type="date" name="from" value="${esc(from)}" min="${esc(min||"")}" max="${esc(max||"")}"></div>
+          <div class="field"><label>По дату</label><input type="date" name="to" value="${esc(to)}" min="${esc(min||"")}" max="${esc(max||"")}"></div>
           <button class="btn" type="submit">Показать</button>
           <button class="btn ghost" type="button" id="chartsRangeReset">Весь период</button>
         </div>
@@ -1940,7 +1940,7 @@ function renderCatalog(){
       <table><thead><tr><th>От, г</th><th>До, г</th><th>Размер, мм</th><th>Категория</th><th>Вид корма</th><th></th></tr></thead>
       <tbody>${rows.length? rows.map(([id,r])=>`
         <tr><td class="num">${fmtN(r.from,2)}</td><td class="num">${fmtN(r.to,2)}</td><td class="num">${r.size?fmtN(r.size,2):"—"}</td><td>${esc(r.category||"—")}</td><td style="text-align:left;">${esc(r.feedType)}</td>
-        <td><button class="btn danger" data-del="catalog:${id}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="6">Справочник пуст</td></tr>`}
+        <td><button class="btn danger" data-del="catalog:${esc(id)}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="6">Справочник пуст</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -2016,11 +2016,11 @@ function renderUsers(){
           <td>${legacy ? `<span class="muted">—</span>` : roleLabel(r)}</td>
           <td>${created}</td>
           <td><div class="row" style="gap:6px; justify-content:flex-end; flex-wrap:wrap;">
-            ${me ? `<span class="muted">—</span>` : legacy ? `<button class="btn ghost small" data-user-del="${key}">Удалить</button>` : `
+            ${me ? `<span class="muted">—</span>` : legacy ? `<button class="btn ghost small" data-user-del="${esc(key)}">Удалить</button>` : `
               ${r !== "user" ? `<button class="btn small" data-user-role="${key}:user">Открыть доступ</button>` : ""}
               ${r !== "pending" ? `<button class="btn ghost small" data-user-role="${key}:pending">Забрать доступ</button>` : ""}
               ${r !== "admin" ? `<button class="btn ghost small" data-user-role="${key}:admin">Сделать админом</button>` : ""}
-              <button class="btn ghost small" data-user-del="${key}">Удалить</button>
+              <button class="btn ghost small" data-user-del="${esc(key)}">Удалить</button>
             `}
           </div></td>
         </tr>`;
