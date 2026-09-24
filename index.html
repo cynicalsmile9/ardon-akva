@@ -248,13 +248,24 @@ let POOLS = LEGACY_POOLS; // переопределяется под текущ�
 const SITES = ["Ардон","Уровень воды Ардон","Инкубатор Ардон","Дарг-Кох"];
 const O2_WARN = 6, O2_BAD = 5;
 const OUT = "OUT"; // виртуальный "бассейн" для продажи/выбытия при пересадке
-function toPoolLabel(v){ return v===OUT ? "Продажа/выбытие" : poolLabel(v); }
+function toPoolLabelRaw(v){ return v===OUT ? "Продажа/выбытие" : poolLabelRaw(v); }
 
-function poolLabel(p){ if(p==="ЗБ") return "ЗБ"; if(/^\d+$/.test(String(p))) return "Б"+p; return String(p); }
+function poolLabelRaw(p){ if(p==="ЗБ") return "ЗБ"; if(/^\d+$/.test(String(p))) return "Б"+p; return String(p); }
 function todayISO(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
-function fmtD(iso){ if(!iso) return "—"; const [y,m,d]=iso.split("-"); return `${d}.${m}.${y}`; }
+function fmtDRaw(iso){ if(!iso) return "—"; const [y,m,d]=iso.split("-"); return `${d}.${m}.${y}`; }
 function num(v, d=0){ const n = Number(v); return Number.isFinite(n) ? n : d; }
 function fmtN(v, digits=0){ if(v===undefined||v===null||Number.isNaN(v)) return "—"; return Number(v).toLocaleString("ru-RU",{minimumFractionDigits:digits,maximumFractionDigits:digits}); }
+// Любое значение из базы перед вставкой в HTML проходит через esc():
+// без этого текст из чужого документа выполнялся бы как код страницы.
+function esc(v){
+  return String(v === undefined || v === null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+// Для HTML — экранированные версии, для выгрузки в Excel — исходные (*Raw).
+function fmtD(iso){ return esc(fmtDRaw(iso)); }
+function poolLabel(p){ return esc(poolLabelRaw(p)); }
+function toPoolLabel(v){ return esc(toPoolLabelRaw(v)); }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 function toast(msg){ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove("show"), 2200); }
 function poolPalette(pool){
@@ -548,7 +559,7 @@ function updateNavUser(){
   const el = document.getElementById("navUser");
   if(!el) return;
   if(!currentUser){ el.innerHTML = ""; return; }
-  el.innerHTML = `<div class="user-badge"><span>&#128100;</span><span class="who">${currentUser.username}</span><button class="btn ghost small" id="logoutBtn" style="margin-left:auto;">Выйти</button></div>`;
+  el.innerHTML = `<div class="user-badge"><span>&#128100;</span><span class="who">${esc(currentUser.username)}</span><button class="btn ghost small" id="logoutBtn" style="margin-left:auto;">Выйти</button></div>`;
   const btn = document.getElementById("logoutBtn");
   if(btn) btn.addEventListener("click", logout);
 }
@@ -824,16 +835,16 @@ function formatSnapshot(col, data){
   if(!data) return "—";
   if(col === "mortality" || col === "feed"){
     const field = col === "mortality" ? "values" : "used";
-    const parts = POOLS.filter(p=> data[field] && num(data[field][p])>0).map(p=> `${poolLabel(p)}: ${fmtN(data[field][p], col==="feed"?1:0)}`);
+    const parts = POOLS.filter(p=> data[field] && num(data[field][p])>0).map(p=> `${poolLabelRaw(p)}: ${fmtN(data[field][p], col==="feed"?1:0)}`);
     let extra = "";
     if(col === "feed"){
-      const retParts = POOLS.filter(p=> data.returned && num(data.returned[p])>0).map(p=> `${poolLabel(p)}: ${fmtN(data.returned[p],1)}`);
+      const retParts = POOLS.filter(p=> data.returned && num(data.returned[p])>0).map(p=> `${poolLabelRaw(p)}: ${fmtN(data.returned[p],1)}`);
       if(retParts.length) extra = " · возврат " + retParts.join(", ");
     }
     return (parts.length? parts.join(", ") : "все по нулям") + extra;
   }
   if(col === "naveski"){
-    const parts = POOLS.filter(p=> data.values && data.values[p]!==undefined && data.values[p]!==null && data.values[p]!=="").map(p=> `${poolLabel(p)}: ${fmtN(data.values[p],3)} кг`);
+    const parts = POOLS.filter(p=> data.values && data.values[p]!==undefined && data.values[p]!==null && data.values[p]!=="").map(p=> `${poolLabelRaw(p)}: ${fmtN(data.values[p],3)} кг`);
     return parts.length? parts.join(", ") : "нет замеров";
   }
   if(col === "temperature"){
@@ -841,13 +852,13 @@ function formatSnapshot(col, data){
     return parts.length? parts.join(", ") : "—";
   }
   if(col === "stocking"){
-    return `${poolLabel(data.pool)} · ${fmtN(data.count)} шт.${data.weight? " · навеска "+fmtN(data.weight,3)+" кг":""}${data.comment? " · "+data.comment:""}`;
+    return `${poolLabelRaw(data.pool)} · ${fmtN(data.count)} шт.${data.weight? " · навеска "+fmtN(data.weight,3)+" кг":""}${data.comment? " · "+data.comment:""}`;
   }
   if(col === "transfers"){
-    return `${poolLabel(data.from)} → ${toPoolLabel(data.to)} · ${fmtN(data.count)} шт.${data.comment? " · "+data.comment:""}`;
+    return `${poolLabelRaw(data.from)} → ${toPoolLabelRaw(data.to)} · ${fmtN(data.count)} шт.${data.comment? " · "+data.comment:""}`;
   }
   if(col === "incidents"){
-    return `${poolLabel(data.pool)} · погибло ${fmtN(data.count)} шт. · ${data.description||""}${data.comment? " · "+data.comment:""}`;
+    return `${poolLabelRaw(data.pool)} · погибло ${fmtN(data.count)} шт. · ${data.description||""}${data.comment? " · "+data.comment:""}`;
   }
   if(col === "catalog"){
     return `${fmtN(data.from,2)}–${fmtN(data.to,2)} г · ${data.feedType||""}`;
@@ -942,21 +953,21 @@ function renderPlots(){
     const pools = Array.isArray(p.pools) ? p.pools : [];
     return `<div class="panel" style="${isCurrent?'border-color:var(--accent);':''}">
       <div class="panel-head">
-        <h2>${p.name||"(без названия)"}${isCurrent?' <span class="tag good" style="margin-left:8px;">текущий</span>':''}</h2>
+        <h2>${esc(p.name||"(без названия)")}${isCurrent?' <span class="tag good" style="margin-left:8px;">текущий</span>':''}</h2>
         <div class="row" style="gap:8px;">
-          ${!isCurrent?`<button class="btn small" data-plot-switch="${id}">Открыть</button>`:''}
-          <button class="btn ghost small" data-plot-rename="${id}">Переименовать</button>
-          ${id!==LEGACY_PLOT_ID?`<button class="btn danger" data-plot-del="${id}">Удалить</button>`:''}
+          ${!isCurrent?`<button class="btn small" data-plot-switch="${esc(id)}">Открыть</button>`:''}
+          <button class="btn ghost small" data-plot-rename="${esc(id)}">Переименовать</button>
+          ${id!==LEGACY_PLOT_ID?`<button class="btn danger" data-plot-del="${esc(id)}">Удалить</button>`:''}
         </div>
       </div>
       <div class="panel-body">
         <label>Бассейны (${pools.length})</label>
         <div class="row" style="gap:6px; margin-bottom:14px; flex-wrap:wrap;">
-          ${pools.length? pools.map(pl=>`<span class="tag muted" style="display:inline-flex; align-items:center; gap:7px; padding:4px 6px 4px 10px;">${poolLabel(pl)}<button class="btn danger" data-pool-del="${id}::${pl}" style="padding:0 6px; font-size:12px; line-height:1.6;" title="Убрать бассейн из участка">×</button></span>`).join("") : `<span class="muted">Бассейнов пока нет</span>`}
+          ${pools.length? pools.map(pl=>`<span class="tag muted" style="display:inline-flex; align-items:center; gap:7px; padding:4px 6px 4px 10px;">${poolLabel(pl)}<button class="btn danger" data-pool-del="${esc(id)}::${esc(pl)}" style="padding:0 6px; font-size:12px; line-height:1.6;" title="Убрать бассейн из участка">×</button></span>`).join("") : `<span class="muted">Бассейнов пока нет</span>`}
         </div>
         <div class="row" style="gap:8px; align-items:flex-end;">
-          <div class="field" style="max-width:200px; margin-bottom:0;"><label>Добавить бассейн</label><input type="text" data-pool-input="${id}" placeholder="напр. 11 или ЗБ2"></div>
-          <button class="btn ghost small" data-pool-add="${id}">Добавить</button>
+          <div class="field" style="max-width:200px; margin-bottom:0;"><label>Добавить бассейн</label><input type="text" data-pool-input="${esc(id)}" placeholder="напр. 11 или ЗБ2"></div>
+          <button class="btn ghost small" data-pool-add="${esc(id)}">Добавить</button>
         </div>
       </div>
     </div>`;
@@ -1019,7 +1030,7 @@ function renderDash(){
       }
     });
     if(avgPrevMort>0 && todayMortTotal > avgPrevMort*2) alerts.push({kind:"bad", text:`Отход за ${fmtD(last)} (${fmtN(todayMortTotal)} шт.) вдвое выше среднего за 7 дней (${fmtN(avgPrevMort,1)} шт.).`});
-    todayIncidents.forEach(inc=> alerts.push({kind:"bad", text:`ЧП, ${poolLabel(inc.pool)}: ${inc.description||"без описания"} — погибло ${fmtN(inc.count)} шт.`}));
+    todayIncidents.forEach(inc=> alerts.push({kind:"bad", text:`ЧП, ${poolLabel(inc.pool)}: ${esc(inc.description||"без описания")} — погибло ${fmtN(inc.count)} шт.`}));
     if(!alerts.length) alerts.push({kind:"good", text:"Показатели в норме, тревог нет."});
   }
 
@@ -1095,8 +1106,8 @@ function renderStocking(){
           <td class="num">${r.weight?fmtN(r.weight,3):"—"}</td>
           <td class="num">${fmtN(r.count)}</td>
           <td class="num">${r.weight?fmtN(r.weight*num(r.count),1):"—"}</td>
-          <td style="text-align:left; white-space:normal;">${r.comment||""}</td>
-          <td><button class="btn danger" data-del="stocking:${id}">удалить</button></td>
+          <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
+          <td><button class="btn danger" data-del="stocking:${esc(id)}">удалить</button></td>
         </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
@@ -1140,8 +1151,8 @@ function renderTransfers(){
           <td>${fmtD(r.date)}</td><td>${poolLabel(r.from)}</td><td>${toPoolLabel(r.to)}</td>
           <td class="num">${fmtN(r.count)}</td>
           <td class="num">${r.weight?fmtN(r.weight,3):"—"}</td>
-          <td style="text-align:left; white-space:normal;">${r.comment||""}</td>
-          <td><button class="btn danger" data-del="transfers:${id}">удалить</button></td>
+          <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
+          <td><button class="btn danger" data-del="transfers:${esc(id)}">удалить</button></td>
         </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Пока нет пересадок</td></tr>`}
       </tbody></table>
     </div>
@@ -1162,9 +1173,9 @@ function renderMortality(){
     <div class="panel-head"><h2>Внести отход за день</h2><span class="hint">повторное сохранение на ту же дату — обновляет запись</span></div>
     <div class="panel-body">
       <form id="mortForm">
-        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="mortDate" name="date" value="${editDate}"></div>
+        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="mortDate" name="date" value="${esc(editDate)}"></div>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="1" min="0" name="p_${p}" value="${existing&&existing.values&&existing.values[p]!==undefined? existing.values[p]:0}"></div>`).join("")}
+          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="1" min="0" name="p_${p}" value="${existing&&existing.values&&existing.values[p]!==undefined? esc(existing.values[p]):0}"></div>`).join("")}
         </div>
         <button class="btn" type="submit">Сохранить отход</button>
       </form>
@@ -1182,7 +1193,7 @@ function renderMortality(){
           ${POOLS.map(p=>`<td class="num">${r.values&&r.values[p]!==undefined? fmtN(r.values[p]) : "–"}</td>`).join("")}
           <td class="num"><b>${fmtN(tot)}</b></td>
           <td class="num">${pop!==null?fmtN(pop):"—"}</td>
-          <td><button class="btn ghost small" data-edit-mort="${r.date}">изменить</button> <button class="btn danger" data-del="mortality:${r.date}">удалить</button></td>
+          <td><button class="btn ghost small" data-edit-mort="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="mortality:${esc(r.date)}">удалить</button></td>
         </tr>`;
       }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+4}">Пока нет записей</td></tr>`}
       </tbody></table>
@@ -1284,9 +1295,9 @@ function renderIncidents(){
         <tr>
           <td>${fmtD(r.date)}</td><td>${poolLabel(r.pool)}</td>
           <td class="num">${fmtN(r.count)}</td>
-          <td style="text-align:left; white-space:normal;">${r.description||""}</td>
-          <td style="text-align:left; white-space:normal;">${r.comment||""}</td>
-          <td><button class="btn danger" data-del="incidents:${id}">удалить</button></td>
+          <td style="text-align:left; white-space:normal;">${esc(r.description||"")}</td>
+          <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
+          <td><button class="btn danger" data-del="incidents:${esc(id)}">удалить</button></td>
         </tr>`).join("") : `<tr class="empty-row"><td colspan="6">ЧП не зафиксированы</td></tr>`}
       </tbody></table>
     </div>
@@ -1306,14 +1317,14 @@ function renderFeed(){
     <div class="panel-head"><h2>Внести кормление за день</h2></div>
     <div class="panel-body">
       <form id="feedForm">
-        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="feedDate" name="date" value="${editDate}"></div>
+        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="feedDate" name="date" value="${esc(editDate)}"></div>
         <label style="margin-top:4px;">Расход корма, кг</label>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="u_${p}" value="${existing&&existing.used&&existing.used[p]!==undefined? existing.used[p]:0}"></div>`).join("")}
+          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="u_${p}" value="${existing&&existing.used&&existing.used[p]!==undefined? esc(existing.used[p]):0}"></div>`).join("")}
         </div>
         <label>Возврат корма, кг</label>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="r_${p}" value="${existing&&existing.returned&&existing.returned[p]!==undefined? existing.returned[p]:0}"></div>`).join("")}
+          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="r_${p}" value="${existing&&existing.returned&&existing.returned[p]!==undefined? esc(existing.returned[p]):0}"></div>`).join("")}
         </div>
         <button class="btn" type="submit">Сохранить кормление</button>
       </form>
@@ -1332,7 +1343,7 @@ function renderFeed(){
           return pu||pr ? `<td class="num">${fmtN(pu,1)} / ${fmtN(pr,1)}</td>` : `<td class="num hint">–</td>`;
         }).join("")}
         <td class="num">${fmtN(u,1)}</td><td class="num">${fmtN(ret,1)}</td><td class="num"><b>${fmtN(u-ret,1)}</b></td>
-        <td><button class="btn ghost small" data-edit-feed="${r.date}">изменить</button> <button class="btn danger" data-del="feed:${r.date}">удалить</button></td></tr>`;
+        <td><button class="btn ghost small" data-edit-feed="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="feed:${esc(r.date)}">удалить</button></td></tr>`;
       }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+5}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
@@ -1361,10 +1372,10 @@ function renderNaveski(){
     <div class="panel-head"><h2>Внести навеску за день</h2><span class="hint">повторное сохранение на ту же дату — обновляет запись</span></div>
     <div class="panel-body">
       <form id="naveskiForm">
-        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="naveskiDate" name="date" value="${editDate}"></div>
+        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="naveskiDate" name="date" value="${esc(editDate)}"></div>
         <label style="margin-top:4px;">Навеска, кг на 1 рыбу</label>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.001" min="0" name="p_${p}" value="${existing&&existing.values&&existing.values[p]!==undefined? existing.values[p]:""}"></div>`).join("")}
+          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.001" min="0" name="p_${p}" value="${existing&&existing.values&&existing.values[p]!==undefined? esc(existing.values[p]):""}"></div>`).join("")}
         </div>
         <button class="btn" type="submit">Сохранить навески</button>
       </form>
@@ -1377,7 +1388,7 @@ function renderNaveski(){
       <tbody>${dateList.length? dateList.map(r=>`<tr>
         <td>${fmtD(r.date)}</td>
         ${POOLS.map(p=>`<td class="num">${r.values&&r.values[p]!==undefined&&r.values[p]!==""? fmtN(r.values[p],3) : "–"}</td>`).join("")}
-        <td><button class="btn ghost small" data-edit-naveski="${r.date}">изменить</button> <button class="btn danger" data-del="naveski:${r.date}">удалить</button></td>
+        <td><button class="btn ghost small" data-edit-naveski="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="naveski:${esc(r.date)}">удалить</button></td>
       </tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
@@ -1388,8 +1399,8 @@ function renderNaveski(){
       <div class="hint" style="margin-bottom:12px;">Для каждого бассейна берётся последний замер навески на начало и на конец периода (не позже выбранной даты). Прирост биомассы = остаток стада (шт.) × навеска (кг) на эти даты. Корм считается по этому же бассейну за дни между двумя замерами.</div>
       <form id="fcrForm">
         <div class="row" style="align-items:flex-end;">
-          <div class="field"><label>С даты</label><input type="date" name="from" value="${fcrFrom}"></div>
-          <div class="field"><label>По дату</label><input type="date" name="to" value="${fcrTo}"></div>
+          <div class="field"><label>С даты</label><input type="date" name="from" value="${esc(fcrFrom)}"></div>
+          <div class="field"><label>По дату</label><input type="date" name="to" value="${esc(fcrTo)}"></div>
           <button class="btn" type="submit">Рассчитать</button>
         </div>
       </form>
@@ -1433,7 +1444,7 @@ function renderO2(){
     <div class="panel-body">
       <form id="o2Form">
         <div class="row">
-          <div class="field" style="max-width:180px;"><label>Дата</label><input type="date" id="o2Date" name="date" value="${entryDate}"></div>
+          <div class="field" style="max-width:180px;"><label>Дата</label><input type="date" id="o2Date" name="date" value="${esc(entryDate)}"></div>
           <div class="field" style="max-width:140px;"><label>Время</label><input type="time" name="time" value="${new Date().toTimeString().slice(0,5)}"></div>
         </div>
         <div class="grid-entry">
@@ -1448,15 +1459,15 @@ function renderO2(){
     <div class="panel-head">
       <h2>Замеры за день</h2>
       <div class="row" style="gap:10px; align-items:center;">
-        <select id="o2ViewDate">${dateList.map(d=>`<option value="${d}" ${d===viewDate?"selected":""}>${fmtD(d)}</option>`).join("") || `<option>—</option>`}</select>
+        <select id="o2ViewDate">${dateList.map(d=>`<option value="${esc(d)}" ${d===viewDate?"selected":""}>${fmtD(d)}</option>`).join("") || `<option>—</option>`}</select>
         ${exportButton("o2","Выгрузить все замеры в Excel")}
       </div>
     </div>
     <div class="panel-body table-wrap">
       <table><thead><tr><th>Время</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th></th></tr></thead>
       <tbody>${viewDoc && viewDoc.entries && viewDoc.entries.length ? viewDoc.entries.map((e,i)=>`
-        <tr><td>${e.time||"—"}</td>${POOLS.map(p=>`<td class="num">${e.values&&e.values[p]!==undefined?fmtN(e.values[p],2):"–"}</td>`).join("")}
-        <td><button class="btn danger" data-del-o2-entry="${viewDate}:${i}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Нет замеров на эту дату</td></tr>`}
+        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${e.values&&e.values[p]!==undefined?fmtN(e.values[p],2):"–"}</td>`).join("")}
+        <td><button class="btn danger" data-del-o2-entry="${esc(viewDate)}:${i}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Нет замеров на эту дату</td></tr>`}
       </tbody>
       ${viewDoc && viewDoc.entries && viewDoc.entries.length ? `<tfoot><tr style="font-weight:700;"><td>Среднее</td>${POOLS.map(p=>{
         const v = avg[p]; const cls = v===undefined?"muted":v<O2_BAD?"bad":v<O2_WARN?"warn":"good";
@@ -1480,7 +1491,7 @@ function renderTemp(){
     <div class="panel-head"><h2>Внести температуру за день</h2></div>
     <div class="panel-body">
       <form id="tempForm">
-        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="tempDate" name="date" value="${editDate}"></div>
+        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="tempDate" name="date" value="${esc(editDate)}"></div>
         <div class="grid-entry">
           ${SITES.map(s=>`<div class="cell" style="min-width:150px;"><label>${s}</label><input type="number" step="0.1" name="s_${s}" value="${existing&&existing.values&&existing.values[s]!==undefined?existing.values[s]:''}"></div>`).join("")}
         </div>
@@ -1494,7 +1505,7 @@ function renderTemp(){
       <table><thead><tr><th>Дата</th>${SITES.map(s=>`<th>${s}</th>`).join("")}<th></th></tr></thead>
       <tbody>${dateList.length? dateList.map(r=>`
         <tr><td>${fmtD(r.date)}</td>${SITES.map(s=>`<td class="num">${r.values&&r.values[s]!==undefined?fmtN(r.values[s],1):"–"}</td>`).join("")}
-        <td><button class="btn ghost small" data-edit-temp="${r.date}">изменить</button> <button class="btn danger" data-del="temperature:${r.date}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${SITES.length+2}">Пока нет записей</td></tr>`}
+        <td><button class="btn ghost small" data-edit-temp="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="temperature:${esc(r.date)}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${SITES.length+2}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -1529,7 +1540,7 @@ function renderTreat(){
     <div class="panel-body table-wrap">
       <table><thead><tr><th>Дата</th><th>Бассейн</th><th>Обработка</th><th></th></tr></thead>
       <tbody>${all.length? all.map(ev=>`
-        <tr><td>${fmtD(ev.date)}</td><td>${poolLabel(ev.pool)}</td><td style="text-align:left; white-space:normal;">${ev.text}</td>
+        <tr><td>${fmtD(ev.date)}</td><td>${poolLabel(ev.pool)}</td><td style="text-align:left; white-space:normal;">${esc(ev.text)}</td>
         <td><button class="btn danger" data-del-treat="${ev.date}:${ev.idx}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="4">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
@@ -1902,7 +1913,7 @@ function renderCatalog(){
     <div class="panel-body table-wrap">
       <table><thead><tr><th>От, г</th><th>До, г</th><th>Размер, мм</th><th>Категория</th><th>Вид корма</th><th></th></tr></thead>
       <tbody>${rows.length? rows.map(([id,r])=>`
-        <tr><td class="num">${fmtN(r.from,2)}</td><td class="num">${fmtN(r.to,2)}</td><td class="num">${r.size?fmtN(r.size,2):"—"}</td><td>${r.category||"—"}</td><td style="text-align:left;">${r.feedType}</td>
+        <tr><td class="num">${fmtN(r.from,2)}</td><td class="num">${fmtN(r.to,2)}</td><td class="num">${r.size?fmtN(r.size,2):"—"}</td><td>${esc(r.category||"—")}</td><td style="text-align:left;">${esc(r.feedType)}</td>
         <td><button class="btn danger" data-del="catalog:${id}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="6">Справочник пуст</td></tr>`}
       </tbody></table>
     </div>
@@ -1939,10 +1950,10 @@ function renderArchive(){
         const actionTag = e.action === "delete" ? `<span class="tag bad">удалено</span>` : `<span class="tag warn">изменено</span>`;
         return `<tr>
           <td>${whenStr}</td>
-          <td>${SECTION_NAMES[e.section]||e.section}</td>
+          <td>${esc(SECTION_NAMES[e.section]||e.section)}</td>
           <td>${fmtD(e.date)}</td>
           <td>${actionTag}</td>
-          <td style="text-align:left; white-space:normal;">${formatSnapshot(e.section, e.snapshot)}</td>
+          <td style="text-align:left; white-space:normal;">${esc(formatSnapshot(e.section, e.snapshot))}</td>
         </tr>`;
       }).join("") : `<tr class="empty-row"><td colspan="5">Пока нет изменённых или удалённых записей — архив заполняется автоматически при редактировании или удалении.</td></tr>`}
       </tbody></table>
@@ -1975,7 +1986,7 @@ function renderUsers(){
         const created = (u && u.createdAt) ? fmtD(new Date(u.createdAt).toISOString().slice(0,10)) : "—";
         const legacy = !!(u && u.hash);
         return `<tr>
-          <td><b>${(u && (u.email || u.username)) || key}</b>${me ? ` <span class="muted">— это вы</span>` : ""}${legacy ? ` <span class="muted">— старый аккаунт, вход отключён</span>` : ""}</td>
+          <td><b>${esc((u && (u.email || u.username)) || key)}</b>${me ? ` <span class="muted">— это вы</span>` : ""}${legacy ? ` <span class="muted">— старый аккаунт, вход отключён</span>` : ""}</td>
           <td>${legacy ? `<span class="muted">—</span>` : roleLabel(r)}</td>
           <td>${created}</td>
           <td><div class="row" style="gap:6px; justify-content:flex-end; flex-wrap:wrap;">
@@ -2401,7 +2412,7 @@ function aoaSheet(aoa){ return XLSX.utils.aoa_to_sheet(aoa); }
 function buildWorkbook_stocking(){
   const rows = Object.values(state.stocking).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const aoa = [["Дата","Бассейн","Навеска, кг","Количество, шт.","Биомасса, кг","Комментарий"]];
-  rows.forEach(r=> aoa.push([fmtD(r.date), poolLabel(r.pool), r.weight||"", num(r.count), r.weight?Number((r.weight*num(r.count)).toFixed(2)):"", r.comment||""]));
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.pool), r.weight||"", num(r.count), r.weight?Number((r.weight*num(r.count)).toFixed(2)):"", r.comment||""]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Зарыбление");
   return { wb, filename:"Зарыбление.xlsx" };
@@ -2410,7 +2421,7 @@ function buildWorkbook_stocking(){
 function buildWorkbook_transfers(){
   const rows = Object.values(state.transfers).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const aoa = [["Дата","Из бассейна","В бассейн","Количество, шт.","Навеска, кг","Комментарий"]];
-  rows.forEach(r=> aoa.push([fmtD(r.date), poolLabel(r.from), toPoolLabel(r.to), num(r.count), r.weight||"", r.comment||""]));
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.from), toPoolLabelRaw(r.to), num(r.count), r.weight||"", r.comment||""]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Пересадки");
   return { wb, filename:"Пересадки.xlsx" };
@@ -2419,7 +2430,7 @@ function buildWorkbook_transfers(){
 function buildWorkbook_incidents(){
   const rows = Object.values(state.incidents).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const aoa = [["Дата","Бассейн","Погибло, шт.","Описание","Комментарий"]];
-  rows.forEach(r=> aoa.push([fmtD(r.date), poolLabel(r.pool), num(r.count), r.description||"", r.comment||""]));
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.pool), num(r.count), r.description||"", r.comment||""]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "ЧП");
   return { wb, filename:"ЧП.xlsx" };
@@ -2428,11 +2439,11 @@ function buildWorkbook_incidents(){
 function buildWorkbook_mortality(){
   const { byDate } = buildPopulation();
   const rows = Object.values(state.mortality).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата", ...POOLS.map(poolLabel), "Итого отход", "Остаток стада"]];
+  const aoa = [["Дата", ...POOLS.map(poolLabelRaw), "Итого отход", "Остаток стада"]];
   rows.forEach(r=>{
     const tot = dayTotal(r,"values");
     const pop = byDate[r.date] ? POOLS.reduce((s,p)=>s+num(byDate[r.date][p]),0) : "";
-    aoa.push([fmtD(r.date), ...POOLS.map(p=> r.values&&r.values[p]!==undefined? num(r.values[p]) : ""), tot, pop]);
+    aoa.push([fmtDRaw(r.date), ...POOLS.map(p=> r.values&&r.values[p]!==undefined? num(r.values[p]) : ""), tot, pop]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Отход и численность");
@@ -2441,15 +2452,15 @@ function buildWorkbook_mortality(){
 
 function buildWorkbook_naveski(){
   const rows = Object.values(state.naveski).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата", ...POOLS.map(p=>"Навеска "+poolLabel(p)+", кг")]];
-  rows.forEach(r=> aoa.push([fmtD(r.date), ...POOLS.map(p=> r.values&&r.values[p]!==undefined&&r.values[p]!==""? num(r.values[p]) : "")]));
+  const aoa = [["Дата", ...POOLS.map(p=>"Навеска "+poolLabelRaw(p)+", кг")]];
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), ...POOLS.map(p=> r.values&&r.values[p]!==undefined&&r.values[p]!==""? num(r.values[p]) : "")]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Навески");
   const fcrRows = computeFCRTable("", renderNaveski._fcrTo || todayISO());
   const aoa2 = [["Бассейн","Навеска начало, кг","Дата начала","Навеска конец, кг","Дата конца","Остаток начало, шт.","Остаток конец, шт.","Прирост биомассы, кг","Корм за период, кг","Кормовой коэффициент"]];
   fcrRows.forEach(r=>{
-    if(r.ok) aoa2.push([poolLabel(r.pool), r.naveskaStart, fmtD(r.startDate), r.naveskaEnd, fmtD(r.endDate), r.popStart, r.popEnd, Number(r.gain.toFixed(2)), Number(r.feed.toFixed(2)), r.fcr!==null? Number(r.fcr.toFixed(3)) : ""]);
-    else aoa2.push([poolLabel(r.pool), "", "", "", "", "", "", "", "", r.reason]);
+    if(r.ok) aoa2.push([poolLabelRaw(r.pool), r.naveskaStart, fmtDRaw(r.startDate), r.naveskaEnd, fmtDRaw(r.endDate), r.popStart, r.popEnd, Number(r.gain.toFixed(2)), Number(r.feed.toFixed(2)), r.fcr!==null? Number(r.fcr.toFixed(3)) : ""]);
+    else aoa2.push([poolLabelRaw(r.pool), "", "", "", "", "", "", "", "", r.reason]);
   });
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa2), "ФКК по бассейнам");
   return { wb, filename:"Навески и кормовой коэффициент.xlsx" };
@@ -2457,11 +2468,11 @@ function buildWorkbook_naveski(){
 
 function buildWorkbook_population(){
   const { dates, byDate } = buildPopulation();
-  const aoa = [["Дата", ...POOLS.map(poolLabel), "Итого"]];
+  const aoa = [["Дата", ...POOLS.map(poolLabelRaw), "Итого"]];
   [...dates].reverse().forEach(d=>{
     const row = byDate[d];
     const tot = POOLS.reduce((s,p)=>s+num(row[p]),0);
-    aoa.push([fmtD(d), ...POOLS.map(p=>num(row[p])), tot]);
+    aoa.push([fmtDRaw(d), ...POOLS.map(p=>num(row[p])), tot]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Численность стада");
@@ -2470,10 +2481,10 @@ function buildWorkbook_population(){
 
 function buildWorkbook_feed(){
   const rows = Object.values(state.feed).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата", ...POOLS.map(p=>"Расход "+poolLabel(p)), "Итого расход", ...POOLS.map(p=>"Возврат "+poolLabel(p)), "Итого возврат", "Чистый расход"]];
+  const aoa = [["Дата", ...POOLS.map(p=>"Расход "+poolLabelRaw(p)), "Итого расход", ...POOLS.map(p=>"Возврат "+poolLabelRaw(p)), "Итого возврат", "Чистый расход"]];
   rows.forEach(r=>{
     const u = dayTotal(r,"used"), ret = dayTotal(r,"returned");
-    aoa.push([fmtD(r.date),
+    aoa.push([fmtDRaw(r.date),
       ...POOLS.map(p=> r.used&&r.used[p]!==undefined? num(r.used[p]) : ""), u,
       ...POOLS.map(p=> r.returned&&r.returned[p]!==undefined? num(r.returned[p]) : ""), ret,
       Number((u-ret).toFixed(2))]);
@@ -2485,13 +2496,13 @@ function buildWorkbook_feed(){
 
 function buildWorkbook_o2(){
   const dates = Object.keys(state.o2).sort();
-  const aoaEntries = [["Дата","Время", ...POOLS.map(poolLabel)]];
-  const aoaAvg = [["Дата", ...POOLS.map(poolLabel)]];
+  const aoaEntries = [["Дата","Время", ...POOLS.map(poolLabelRaw)]];
+  const aoaAvg = [["Дата", ...POOLS.map(poolLabelRaw)]];
   dates.forEach(d=>{
     const doc = state.o2[d];
-    (doc.entries||[]).forEach(e=> aoaEntries.push([fmtD(d), e.time||"", ...POOLS.map(p=> e.values&&e.values[p]!==undefined? num(e.values[p]) : "")]));
+    (doc.entries||[]).forEach(e=> aoaEntries.push([fmtDRaw(d), e.time||"", ...POOLS.map(p=> e.values&&e.values[p]!==undefined? num(e.values[p]) : "")]));
     const avg = o2DailyAvg(doc);
-    aoaAvg.push([fmtD(d), ...POOLS.map(p=> avg[p]!==undefined? Number(avg[p].toFixed(2)) : "")]);
+    aoaAvg.push([fmtDRaw(d), ...POOLS.map(p=> avg[p]!==undefined? Number(avg[p].toFixed(2)) : "")]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoaEntries), "О2 замеры");
@@ -2502,7 +2513,7 @@ function buildWorkbook_o2(){
 function buildWorkbook_temp(){
   const rows = Object.values(state.temperature).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const aoa = [["Дата", ...SITES]];
-  rows.forEach(r=> aoa.push([fmtD(r.date), ...SITES.map(s=> r.values&&r.values[s]!==undefined? num(r.values[s]) : "")]));
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), ...SITES.map(s=> r.values&&r.values[s]!==undefined? num(r.values[s]) : "")]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Температура");
   return { wb, filename:"Температура.xlsx" };
@@ -2513,7 +2524,7 @@ function buildWorkbook_treat(){
   Object.values(state.treatments).forEach(doc=> (doc.events||[]).forEach(ev=> all.push({date:doc.date, ...ev})));
   all.sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const aoa = [["Дата","Бассейн","Обработка"]];
-  all.forEach(ev=> aoa.push([fmtD(ev.date), poolLabel(ev.pool), ev.text]));
+  all.forEach(ev=> aoa.push([fmtDRaw(ev.date), poolLabelRaw(ev.pool), ev.text]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Обработки");
   return { wb, filename:"Обработки.xlsx" };
@@ -2531,7 +2542,7 @@ function buildWorkbook_summary(){
     const o2Mean = o2Vals.length ? o2Vals.reduce((a,b)=>a+b,0)/o2Vals.length : "";
     const pop = byDate[date] ? POOLS.reduce((s,p)=>s+num(byDate[date][p]),0) : "";
     const temp = state.temperature[date] && state.temperature[date].values ? state.temperature[date].values[SITES[0]] : "";
-    aoa.push([fmtD(date), pop, mort, Number(feed.toFixed(2)), o2Mean!==""?Number(o2Mean.toFixed(2)):"", temp]);
+    aoa.push([fmtDRaw(date), pop, mort, Number(feed.toFixed(2)), o2Mean!==""?Number(o2Mean.toFixed(2)):"", temp]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Сводка");
@@ -2552,8 +2563,8 @@ function buildWorkbook_archive(){
   const aoa = [["Когда изменено","Раздел","Дата записи","Действие","Предыдущее значение"]];
   entries.forEach(e=>{
     const when = e.archivedAt ? new Date(e.archivedAt) : null;
-    const whenStr = when ? `${fmtD(when.toISOString().slice(0,10))} ${when.toTimeString().slice(0,5)}` : "";
-    aoa.push([whenStr, SECTION_NAMES[e.section]||e.section, fmtD(e.date), e.action==="delete"?"удалено":"изменено", formatSnapshot(e.section, e.snapshot)]);
+    const whenStr = when ? `${fmtDRaw(when.toISOString().slice(0,10))} ${when.toTimeString().slice(0,5)}` : "";
+    aoa.push([whenStr, SECTION_NAMES[e.section]||e.section, fmtDRaw(e.date), e.action==="delete"?"удалено":"изменено", formatSnapshot(e.section, e.snapshot)]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Архив изменений");
