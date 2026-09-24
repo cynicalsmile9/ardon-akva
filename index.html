@@ -441,6 +441,15 @@ let profileEnsured = false;
 // Список аккаунтов запрашивается только после входа — правила базы открывают
 // его лишь вошедшему. Сами данные хозяйства запрашиваются ещё позже: только
 // когда у аккаунта есть подтверждённый доступ.
+// Если администратор закрыл доступ уже во время работы, вкладку нельзя
+// просто переключить на экран «доступ не подтверждён»: в памяти остаются
+// загруженные данные. Поэтому сессия завершается полностью.
+let accessWasGranted = false;
+async function forceLogout(reason){
+  try{ sessionStorage.setItem("farmLogoutReason", reason || ""); }catch(e){}
+  await logout();
+}
+
 function startUsersStore(){
   if(usersStoreStarted) return;
   usersStoreStarted = true;
@@ -458,6 +467,13 @@ function startUsersStore(){
     state.users = next;
     usersLoaded = true;
     ensureProfile();
+    if(hasAccess()){
+      accessWasGranted = true;
+    } else if(accessWasGranted){
+      accessWasGranted = false;
+      forceLogout("Администратор закрыл доступ к данным. Войдите ещё раз или обратитесь к администратору.");
+      return;
+    }
     if(roleOf(uid) === "admin") startAdminUsersStore();
     scheduleRender();
   }, err=>{
@@ -516,7 +532,10 @@ function authErrorMessage(err){
   const code = (err && err.code) || "";
   if(code === "auth/invalid-email") return "Неверный формат почты";
   if(code === "auth/email-already-in-use") return "Такая почта уже зарегистрирована";
-  if(code === "auth/weak-password") return "Слишком простой пароль: минимум 6 символов";
+  if(code === "auth/weak-password" || code === "auth/password-does-not-meet-requirements")
+    return "Пароль не отвечает требованиям: не короче 10 символов";
+  if(code === "auth/admin-restricted-operation")
+    return "Регистрация закрыта: аккаунт заводит администратор";
   if(code === "auth/operation-not-allowed") return "Вход по почте и паролю не включён в Firebase";
   if(code === "auth/too-many-requests") return "Слишком много попыток, попробуйте позже";
   if(code === "auth/network-request-failed") return "Нет связи с сервером";
@@ -546,21 +565,8 @@ function roleLabel(r){
   return "Ждёт подтверждения";
 }
 
-async function handleRegister(emailRaw, password, password2){
-  const email = (emailRaw||"").trim();
-  if(!email || !password) return { ok:false, msg:"Заполните почту и пароль" };
-  if(password.length < 6) return { ok:false, msg:"Пароль должен быть не короче 6 символов" };
-  if(password !== password2) return { ok:false, msg:"Пароли не совпадают" };
-  if(!auth) return { ok:false, msg:"Нет связи с сервером" };
-  try{
-    const cred = await auth.createUserWithEmailAndPassword(email, password);
-    // Новый аккаунт заводится без доступа к данным: его открывает администратор.
-    try{
-      await Store.setDoc("users", cred.user.uid, { email, role: "pending", createdAt: Date.now() });
-    }catch(err){ console.warn("profile create failed", err); }
-    return { ok:true };
-  }catch(err){ return { ok:false, msg: authErrorMessage(err) }; }
-}
+// Самостоятельная регистрация отключена в Firebase Authentication:
+// аккаунты заводит администратор, поэтому формы регистрации в приложении нет.
 
 async function handleLogin(emailRaw, password){
   const email = (emailRaw||"").trim();
@@ -592,32 +598,25 @@ function updateNavUser(){
 }
 
 function renderAuthScreen(){
-  const mode = renderAuthScreen._mode || "login";
   const err = renderAuthScreen._err || "";
+  // Причина принудительного выхода (например, администратор закрыл доступ)
+  // показывается один раз — сразу после перезагрузки страницы.
+  let notice = "";
+  try{ notice = sessionStorage.getItem("farmLogoutReason") || ""; if(notice) sessionStorage.removeItem("farmLogoutReason"); }catch(e){}
   return `
   <div class="auth-wrap">
     <div class="auth-card">
       <div class="brand" style="justify-content:center; padding-bottom:22px;"><span class="dot"></span>Ардон Аква</div>
       <div class="panel"><div class="panel-body">
-        <div class="auth-tabs">
-          <button type="button" data-auth-tab="login" class="${mode==="login"?"active":""}">Вход</button>
-          <button type="button" data-auth-tab="register" class="${mode==="register"?"active":""}">Регистрация</button>
-        </div>
-        ${mode === "login" ? `
         <form id="loginForm">
           <div class="field"><label>Почта</label><input type="email" name="email" autocomplete="username" required></div>
           <div class="field"><label>Пароль</label><input type="password" name="password" autocomplete="current-password" required></div>
           <button class="btn" type="submit" style="width:100%;">Войти</button>
-        </form>` : `
-        <form id="registerForm">
-          <div class="field"><label>Почта</label><input type="email" name="email" autocomplete="username" required></div>
-          <div class="field"><label>Пароль</label><input type="password" name="password" autocomplete="new-password" required></div>
-          <div class="field"><label>Повторите пароль</label><input type="password" name="password2" autocomplete="new-password" required></div>
-          <button class="btn" type="submit" style="width:100%;">Зарегистрироваться</button>
-        </form>`}
+        </form>
+        ${notice ? `<div class="auth-error">${esc(notice)}</div>` : ""}
         ${err ? `<div class="auth-error">${err}</div>` : ""}
       </div></div>
-      <div class="auth-note">Вход через Firebase Authentication: пароль проверяет сервер, приложение его не видит и не хранит. Новый аккаунт данных не получает — доступ открывает администратор.</div>
+      <div class="auth-note">Вход через Firebase Authentication: пароль проверяет сервер, приложение его не видит и не хранит. Регистрация закрыта — аккаунт заводит администратор.</div>
     </div>
   </div>`;
 }
@@ -2071,9 +2070,6 @@ function wireActiveSection(){
   const main = document.getElementById("main");
 
   if(!currentUser){
-    main.querySelectorAll("[data-auth-tab]").forEach(b=>{
-      b.addEventListener("click", ()=>{ renderAuthScreen._mode = b.dataset.authTab; renderAuthScreen._err = ""; renderActive(); });
-    });
     const loginForm = document.getElementById("loginForm");
     if(loginForm) loginForm.addEventListener("submit", async e=>{
       e.preventDefault();
@@ -2086,20 +2082,6 @@ function wireActiveSection(){
         renderAuthScreen._err = "";
         // дальше экран переключит onAuthStateChanged
       }catch(err){ console.error("login failed", err); renderAuthScreen._err = "Не удалось войти, попробуйте ещё раз"; renderActive(); }
-      finally{ if(btn) btn.disabled = false; }
-    });
-    const registerForm = document.getElementById("registerForm");
-    if(registerForm) registerForm.addEventListener("submit", async e=>{
-      e.preventDefault();
-      const f = new FormData(registerForm);
-      const btn = registerForm.querySelector("button[type=submit]");
-      if(btn) btn.disabled = true;
-      try{
-        const res = await handleRegister(f.get("email"), f.get("password"), f.get("password2"));
-        if(!res.ok){ renderAuthScreen._err = res.msg; renderActive(); return; }
-        renderAuthScreen._err = "";
-        toast("Аккаунт создан. Доступ к данным открывает администратор");
-      }catch(err){ console.error("register failed", err); renderAuthScreen._err = "Не удалось зарегистрироваться, попробуйте ещё раз"; renderActive(); }
       finally{ if(btn) btn.disabled = false; }
     });
     return;
@@ -2652,6 +2634,10 @@ async function boot(){
       firebase.initializeApp(FIREBASE_CONFIG);
       db = firebase.firestore();
       auth = firebase.auth();
+      // Вход запоминается между запусками браузера — выбрано осознанно:
+      // компьютеры личные. Для общего компьютера здесь ставится SESSION.
+      try{ auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); }
+      catch(err){ console.warn("setPersistence failed", err); }
     }
   }catch(err){ console.warn("Firebase unavailable, falling back to local memory", err); db = null; auth = null; }
   dbAvailable = !!db;
