@@ -2642,9 +2642,10 @@ async function boot(){
       // приложение продолжает работать — запись об этом уходит в консоль.
       try{
         if(typeof firebase.appCheck === "function"){
-          // Ключ reCAPTCHA v3 (классический), поэтому используется
-          // провайдер ReCaptchaV3Provider.
-          const Provider = firebase.appCheck.ReCaptchaV3Provider;
+          // В консоли Firebase приложение зарегистрировано с провайдером
+          // reCAPTCHA Enterprise (классический reCAPTCHA там помечен как
+          // устаревший), поэтому ключ сайта передаётся через него.
+          const Provider = firebase.appCheck.ReCaptchaEnterpriseProvider;
           firebase.appCheck().activate(
             Provider ? new Provider(APPCHECK_SITE_KEY) : APPCHECK_SITE_KEY, true);
         }
