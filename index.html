@@ -432,6 +432,7 @@ function scheduleRender(){
 
 let usersLoaded = false;
 let usersStoreStarted = false;
+let adminUsersStarted = false;
 let dataStoreStarted = false;
 let profileEnsured = false;
 
@@ -441,12 +442,36 @@ let profileEnsured = false;
 function startUsersStore(){
   if(usersStoreStarted) return;
   usersStoreStarted = true;
-  Store.watchCollection("users", data=>{
-    state.users = data;
+  const uid = currentUser.key;
+  if(!db){
+    Store.watchCollection("users", data=>{ state.users = data; usersLoaded = true; ensureProfile(); scheduleRender(); });
+    return;
+  }
+  // Обычный аккаунт читает только свою карточку: чужие почты и роли ему
+  // не нужны, и правила базы их ему не отдают.
+  db.collection("users").doc(uid).onSnapshot(snap=>{
+    const rec = snap.exists ? snap.data() : null;
+    const next = {...state.users};
+    if(rec) next[uid] = rec; else delete next[uid];
+    state.users = next;
     usersLoaded = true;
     ensureProfile();
+    if(roleOf(uid) === "admin") startAdminUsersStore();
+    scheduleRender();
+  }, err=>{
+    console.warn("users doc watch failed", err);
+    usersLoaded = true;
     scheduleRender();
   });
+}
+
+// Полный список аккаунтов нужен только администратору — для раздела
+// «Пользователи». Подписка включается лишь после того, как роль admin
+// подтверждена его собственной карточкой.
+function startAdminUsersStore(){
+  if(adminUsersStarted) return;
+  adminUsersStarted = true;
+  Store.watchCollection("users", data=>{ state.users = data; scheduleRender(); });
 }
 
 // У аккаунта, заведённого напрямую в консоли Firebase, ещё нет карточки
