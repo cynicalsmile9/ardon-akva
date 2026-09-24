@@ -1,4 +1,4 @@
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://www.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebaseinstallations.googleapis.com https://www.googleapis.com https://content-firebaseappcheck.googleapis.com https://www.google.com; frame-src https://www.google.com; manifest-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebaseinstallations.googleapis.com https://www.googleapis.com; manifest-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
 <script>if(window.top !== window.self){ window.top.location = window.self.location; }</script>
 <title>Ардон Аква</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -238,7 +238,6 @@
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js" integrity="sha384-AQ3POAMqIhwS81FrUH95ekxqBZHeP5tG2JfEL3+7GuTtfRLWnrRh32UxwzM+//A9" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js" integrity="sha384-qn4Jh88HhJA8dplNQyGjOh9OGI4izVhrfj/qIFgaKcdgOE06pXqIKGlsCILZcLAC" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js" integrity="sha384-TnlRYaR4JYz/lpaGuaiU61PjNberSA4vjLjtF+oRC/IkohkJqnWxw5EmDSOt1vA1" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-check-compat.js" integrity="sha384-E3vxFxXu8FhW5kvqdQJ5Yf8ugrV7iCJP8jgnItRH2Rk8Q08cJzJGTi/oMC3FEp3j" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 /* =========================================================================
    Ардон Аква — журнал рыбоводного хозяйства
@@ -2629,27 +2628,10 @@ const FIREBASE_CONFIG = {
   appId: "1:528564066792:web:c558c7c6bc3ba5f27eec5d"
 };
 
-// Публичный ключ сайта reCAPTCHA v3 для App Check (секретный ключ — только в консоли Firebase).
-const APPCHECK_SITE_KEY = "6Lf4IMwtAAAAAIIgOspKgxv0nVGlKlt7o-7aHexE";
-
 async function boot(){
   try{
     if(window.firebase && typeof firebase.initializeApp === "function"){
       firebase.initializeApp(FIREBASE_CONFIG);
-      // App Check: Firebase принимает запросы только от этой страницы,
-      // подтверждённой через reCAPTCHA. Ключ сайта публичный, секретный
-      // ключ хранится в консоли Firebase. Если reCAPTCHA недоступна,
-      // приложение продолжает работать — запись об этом уходит в консоль.
-      try{
-        if(typeof firebase.appCheck === "function"){
-          // В консоли Firebase приложение зарегистрировано с провайдером
-          // reCAPTCHA Enterprise (классический reCAPTCHA там помечен как
-          // устаревший), поэтому ключ сайта передаётся через него.
-          const Provider = firebase.appCheck.ReCaptchaEnterpriseProvider;
-          firebase.appCheck().activate(
-            Provider ? new Provider(APPCHECK_SITE_KEY) : APPCHECK_SITE_KEY, true);
-        }
-      }catch(err){ console.warn("App Check activate failed", err); }
       db = firebase.firestore();
       auth = firebase.auth();
       // Вход запоминается между запусками браузера — выбрано осознанно:
