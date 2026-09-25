@@ -247,7 +247,6 @@
 
 const LEGACY_POOLS = ["1","2","3","4","5","6","7","8","9","10","ЗБ"];
 let POOLS = LEGACY_POOLS; // переопределяется под текущий выбранный участок, см. syncPoolsFromPlot()
-const SITES = ["Ардон","Уровень воды Ардон","Инкубатор Ардон","Дарг-Кох"];
 const O2_WARN = 6, O2_BAD = 5;
 const OUT = "OUT"; // виртуальный "бассейн" для продажи/выбытия при пересадке
 function toPoolLabelRaw(v){ return v===OUT ? "Продажа/выбытие" : poolLabelRaw(v); }
@@ -860,6 +859,23 @@ function o2DailyAvg(dayDoc){
   return out;
 }
 
+// Среднесуточная температура по бассейнам — считается так же, как по О2:
+// все замеры за день усредняются отдельно для каждого бассейна.
+function tempDailyAvg(dayDoc){
+  const out = {};
+  POOLS.forEach(p=>{
+    const vals = ((dayDoc&&dayDoc.entries)||[]).map(e=>e.values && e.values[p]).filter(v=>v!==undefined && v!==null && v!=="" && !Number.isNaN(Number(v)));
+    if(vals.length){ out[p] = vals.reduce((a,b)=>a+Number(b),0)/vals.length; }
+  });
+  return out;
+}
+
+// Одно число за день — среднее по всем бассейнам, для сводки и дашборда.
+function tempDayMean(dayDoc){
+  const vals = Object.values(tempDailyAvg(dayDoc));
+  return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+}
+
 function dayTotal(obj, field){
   if(!obj) return 0;
   const v = obj[field]||{};
@@ -904,8 +920,8 @@ function formatSnapshot(col, data){
     return parts.length? parts.join(", ") : "нет замеров";
   }
   if(col === "temperature"){
-    const parts = SITES.filter(s=> data.values && data.values[s]!==undefined).map(s=> `${s}: ${fmtN(data.values[s],1)}°C`);
-    return parts.length? parts.join(", ") : "—";
+    const n = (data.entries||[]).length;
+    return `${n} замер(ов) температуры за день`;
   }
   if(col === "stocking"){
     return `${poolLabelRaw(data.pool)} · ${fmtN(data.count)} шт.${data.weight? " · навеска "+fmtN(data.weight,3)+" кг":""}${data.comment? " · "+data.comment:""}`;
@@ -1094,8 +1110,7 @@ function renderDash(){
   const o2Vals = Object.values(todayO2);
   const o2Avg = o2Vals.length ? o2Vals.reduce((a,b)=>a+b,0)/o2Vals.length : null;
 
-  const todayTemp = state.temperature[last];
-  const tempMain = todayTemp && todayTemp.values ? todayTemp.values[SITES[0]] : null;
+  const tempMain = tempDayMean(state.temperature[last]);
 
   // alerts
   const alerts = [];
@@ -1562,31 +1577,50 @@ function renderO2(){
    Температура
    ------------------------------------------------------------------- */
 function renderTemp(){
-  const editDate = renderTemp._editDate || todayISO();
-  const existing = state.temperature[editDate];
-  const dateList = Object.values(state.temperature).sort((a,b)=>b.date.localeCompare(a.date));
+  const entryDate = renderTemp._entryDate || todayISO();
+  const dateDoc = state.temperature[entryDate];
+  const dateList = Object.keys(state.temperature).sort().reverse();
+  const viewDate = renderTemp._viewDate || dateList[0] || entryDate;
+  const viewDoc = state.temperature[viewDate];
+  const avg = tempDailyAvg(viewDoc);
+
   return `
-  ${topbar("Температура", "Замеры по точкам контроля")}
+  ${topbar("Температура", "Замеры по бассейнам несколько раз в день — среднесуточное значение считается автоматически")}
   <div class="panel">
-    <div class="panel-head"><h2>Внести температуру за день</h2></div>
+    <div class="panel-head"><h2>Новый замер</h2><span class="hint">каждое сохранение добавляет ещё одну точку на выбранную дату</span></div>
     <div class="panel-body">
       <form id="tempForm">
-        <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="tempDate" name="date" value="${esc(editDate)}"></div>
-        <div class="grid-entry">
-          ${SITES.map(s=>`<div class="cell" style="min-width:150px;"><label>${s}</label><input type="number" step="0.1" name="s_${s}" value="${existing&&existing.values&&existing.values[s]!==undefined?esc(existing.values[s]):''}"></div>`).join("")}
+        <div class="row">
+          <div class="field" style="max-width:180px;"><label>Дата</label><input type="date" id="tempDate" name="date" value="${esc(entryDate)}"></div>
+          <div class="field" style="max-width:140px;"><label>Время</label><input type="time" name="time" value="${new Date().toTimeString().slice(0,5)}"></div>
         </div>
-        <button class="btn" type="submit">Сохранить температуру</button>
+        <div class="grid-entry">
+          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" name="p_${p}" placeholder="&deg;C"></div>`).join("")}
+        </div>
+        <button class="btn" type="submit">Добавить замер</button>
+        ${dateDoc && dateDoc.entries && dateDoc.entries.length ? `<span class="hint" style="margin-left:10px;">на ${fmtD(entryDate)} уже внесено замеров: ${dateDoc.entries.length}</span>`:""}
       </form>
     </div>
   </div>
   <div class="panel">
-    <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней</span>${exportButton("temp")}</div></div>
+    <div class="panel-head">
+      <h2>Замеры за день</h2>
+      <div class="row" style="gap:10px; align-items:center;">
+        <select id="tempViewDate">${dateList.map(d=>`<option value="${esc(d)}" ${d===viewDate?"selected":""}>${fmtD(d)}</option>`).join("") || `<option>&mdash;</option>`}</select>
+        ${exportButton("temp","Выгрузить все замеры в Excel")}
+      </div>
+    </div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th>${SITES.map(s=>`<th>${s}</th>`).join("")}<th></th></tr></thead>
-      <tbody>${dateList.length? dateList.map(r=>`
-        <tr><td>${fmtD(r.date)}</td>${SITES.map(s=>`<td class="num">${r.values&&r.values[s]!==undefined?fmtN(r.values[s],1):"–"}</td>`).join("")}
-        <td><button class="btn ghost small" data-edit-temp="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="temperature:${esc(r.date)}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${SITES.length+2}">Пока нет записей</td></tr>`}
-      </tbody></table>
+      <table><thead><tr><th>Время</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th></th></tr></thead>
+      <tbody>${viewDoc && viewDoc.entries && viewDoc.entries.length ? viewDoc.entries.map((e,i)=>`
+        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${e.values&&e.values[p]!==undefined?fmtN(e.values[p],1):"–"}</td>`).join("")}
+        <td><button class="btn danger" data-del-temp-entry="${esc(viewDate)}:${i}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Нет замеров на эту дату</td></tr>`}
+      </tbody>
+      ${viewDoc && viewDoc.entries && viewDoc.entries.length ? `<tfoot><tr style="font-weight:700;"><td>Среднее</td>${POOLS.map(p=>{
+        const v = avg[p];
+        return `<td class="num">${v!==undefined?fmtN(v,1):"–"}</td>`;
+      }).join("")}<td></td></tr></tfoot>`:""}
+      </table>
     </div>
   </div>`;
 }
@@ -1641,7 +1675,7 @@ function renderSummary(){
     const o2Vals = Object.values(o2avg);
     const o2Mean = o2Vals.length ? o2Vals.reduce((a,b)=>a+b,0)/o2Vals.length : null;
     const pop = byDate[date] ? POOLS.reduce((s,p)=>s+num(byDate[date][p]),0) : null;
-    const temp = state.temperature[date] && state.temperature[date].values ? state.temperature[date].values[SITES[0]] : null;
+    const temp = tempDayMean(state.temperature[date]);
     return {date, mort, feed, o2Mean, pop, temp};
   });
   return `
@@ -2342,18 +2376,31 @@ function wireActiveSection(){
 
   const tempForm = document.getElementById("tempForm");
   if(tempForm){
-    document.getElementById("tempDate").addEventListener("change", e=>{ renderTemp._editDate = e.target.value; renderActive(); });
+    document.getElementById("tempDate").addEventListener("change", e=>{ renderTemp._entryDate = e.target.value; renderActive(); });
+    const tempViewSel = document.getElementById("tempViewDate");
+    if(tempViewSel) tempViewSel.addEventListener("change", e=>{ renderTemp._viewDate = e.target.value; renderActive(); });
     tempForm.addEventListener("submit", async e=>{
       e.preventDefault();
       const f = new FormData(tempForm);
-      const date = f.get("date");
-      const values = {}; SITES.forEach(s=>{ const v=f.get("s_"+s); if(v!==null && v!=="") values[s]=Number(v); });
-      const old = state.temperature[date];
-      await Store.setDoc(pcol("temperature"), date, {date, values});
-      if(old) await archiveSnapshot("temperature", date, old, "edit");
-      toast("Температура сохранена");
+      const date = f.get("date"), time = f.get("time");
+      const values = {};
+      POOLS.forEach(p=>{ const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v); });
+      const existing = state.temperature[date] || {date, entries:[]};
+      const entries = [...(existing.entries||[]), {time, values}];
+      await Store.setDoc(pcol("temperature"), date, {date, entries});
+      renderTemp._viewDate = date;
+      toast("Замер температуры добавлен");
     });
-    main.querySelectorAll("[data-edit-temp]").forEach(b=> b.addEventListener("click", ()=>{ renderTemp._editDate = b.dataset.editTemp; renderActive(); }));
+    main.querySelectorAll("[data-del-temp-entry]").forEach(b=> b.addEventListener("click", async ()=>{
+      const [date, idxStr] = b.dataset.delTempEntry.split(":");
+      const idx = Number(idxStr);
+      const doc = state.temperature[date];
+      if(!doc) return;
+      const entries = (doc.entries||[]).filter((_,i)=>i!==idx);
+      await Store.setDoc(pcol("temperature"), date, {date, entries});
+      await archiveSnapshot("temperature", date, doc, "edit");
+      toast("Замер удалён");
+    }));
   }
 
   const treatForm = document.getElementById("treatForm");
@@ -2593,8 +2640,21 @@ function buildWorkbook_o2(){
 
 function buildWorkbook_temp(){
   const rows = Object.values(state.temperature).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата", ...SITES]];
-  rows.forEach(r=> aoa.push([fmtDRaw(r.date), ...SITES.map(s=> r.values&&r.values[s]!==undefined? num(r.values[s]) : "")]));
+  const aoa = [["Дата","Время", ...POOLS.map(p=>poolLabelRaw(p)), "Среднее по замеру"]];
+  rows.forEach(r=>{
+    (r.entries||[]).forEach(e=>{
+      const vals = POOLS.map(p=> e.values&&e.values[p]!==undefined ? num(e.values[p]) : "");
+      const nums = vals.filter(v=> v!=="" );
+      const mean = nums.length ? Number((nums.reduce((a,b)=>a+b,0)/nums.length).toFixed(2)) : "";
+      aoa.push([fmtDRaw(r.date), e.time||"", ...vals, mean]);
+    });
+    const avg = tempDailyAvg(r);
+    if(Object.keys(avg).length){
+      const vals = POOLS.map(p=> avg[p]!==undefined ? Number(avg[p].toFixed(2)) : "");
+      const nums = vals.filter(v=> v!=="" );
+      aoa.push([fmtDRaw(r.date), "среднее за день", ...vals, nums.length? Number((nums.reduce((a,b)=>a+b,0)/nums.length).toFixed(2)) : ""]);
+    }
+  });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Температура");
   return { wb, filename:"Температура.xlsx" };
@@ -2622,7 +2682,8 @@ function buildWorkbook_summary(){
     const o2Vals = Object.values(o2avg);
     const o2Mean = o2Vals.length ? o2Vals.reduce((a,b)=>a+b,0)/o2Vals.length : "";
     const pop = byDate[date] ? POOLS.reduce((s,p)=>s+num(byDate[date][p]),0) : "";
-    const temp = state.temperature[date] && state.temperature[date].values ? state.temperature[date].values[SITES[0]] : "";
+    const tm = tempDayMean(state.temperature[date]);
+    const temp = tm!==null ? Number(tm.toFixed(2)) : "";
     aoa.push([fmtDRaw(date), pop, mort, Number(feed.toFixed(2)), o2Mean!==""?Number(o2Mean.toFixed(2)):"", temp]);
   });
   const wb = XLSX.utils.book_new();
