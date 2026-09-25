@@ -148,6 +148,10 @@
   .grid-entry{display:grid; grid-template-columns:repeat(auto-fill, minmax(78px,1fr)); gap:8px; margin-bottom:12px;}
   .grid-entry .cell label{margin-bottom:3px; font-size:11px;}
   .grid-entry .cell input{text-align:right;}
+  .nz-toggle{display:flex; align-items:center; gap:4px; margin-top:3px; font-size:11px; color:var(--ink-dim); cursor:pointer; user-select:none;}
+  .nz-toggle input{width:auto; margin:0; cursor:pointer;}
+  .grid-entry .cell input[disabled]{opacity:.45;}
+  .tag.nz{background:var(--surface-2); color:var(--ink-dim);}
 
   table{width:100%; border-collapse:collapse; font-size:13px;}
   table th{text-align:right; font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:var(--ink-dim); font-weight:600; padding:7px 9px; border-bottom:1px solid var(--border); white-space:nowrap;}
@@ -859,6 +863,28 @@ function o2DailyAvg(dayDoc){
   return out;
 }
 
+// «н/з» — замер в этот час по этому бассейну не делался. Такие ячейки
+// не участвуют в расчёте среднего: среднее считается только по тем
+// временным точкам, где значение действительно измерено.
+const NZ = "н/з";
+function isNZ(v){ return v === NZ; }
+
+// Поле ввода одного бассейна с переключателем «н/з».
+function poolEntryCell(p, unit){
+  return `<div class="cell">
+    <label>${poolLabel(p)}</label>
+    <input type="number" step="0.01" name="p_${p}" placeholder="${unit}" data-nz-input="${esc(p)}">
+    <label class="nz-toggle"><input type="checkbox" name="nz_${p}" data-nz-check="${esc(p)}">н/з</label>
+  </div>`;
+}
+
+// Значение ячейки в таблице замеров: число, «н/з» или прочерк.
+function entryCellText(v, digits){
+  if(isNZ(v)) return `<span class="tag nz">н/з</span>`;
+  if(v===undefined || v===null || v==="") return "–";
+  return fmtN(v, digits);
+}
+
 // Среднесуточная температура по бассейнам — считается так же, как по О2:
 // все замеры за день усредняются отдельно для каждого бассейна.
 function tempDailyAvg(dayDoc){
@@ -1543,7 +1569,7 @@ function renderO2(){
           <div class="field" style="max-width:140px;"><label>Время</label><input type="time" name="time" value="${new Date().toTimeString().slice(0,5)}"></div>
         </div>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.01" name="p_${p}" placeholder="мг/л"></div>`).join("")}
+          ${POOLS.map(p=> poolEntryCell(p, "мг/л")).join("")}
         </div>
         <button class="btn" type="submit">Добавить замер</button>
         ${dateDoc && dateDoc.entries && dateDoc.entries.length ? `<span class="hint" style="margin-left:10px;">на ${fmtD(entryDate)} уже внесено замеров: ${dateDoc.entries.length}</span>`:""}
@@ -1561,7 +1587,7 @@ function renderO2(){
     <div class="panel-body table-wrap">
       <table><thead><tr><th>Время</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th></th></tr></thead>
       <tbody>${viewDoc && viewDoc.entries && viewDoc.entries.length ? viewDoc.entries.map((e,i)=>`
-        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${e.values&&e.values[p]!==undefined?fmtN(e.values[p],2):"–"}</td>`).join("")}
+        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${entryCellText(e.values&&e.values[p], 2)}</td>`).join("")}
         <td><button class="btn danger" data-del-o2-entry="${esc(viewDate)}:${i}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Нет замеров на эту дату</td></tr>`}
       </tbody>
       ${viewDoc && viewDoc.entries && viewDoc.entries.length ? `<tfoot><tr style="font-weight:700;"><td>Среднее</td>${POOLS.map(p=>{
@@ -1595,7 +1621,7 @@ function renderTemp(){
           <div class="field" style="max-width:140px;"><label>Время</label><input type="time" name="time" value="${new Date().toTimeString().slice(0,5)}"></div>
         </div>
         <div class="grid-entry">
-          ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" name="p_${p}" placeholder="&deg;C"></div>`).join("")}
+          ${POOLS.map(p=> poolEntryCell(p, "\u00B0C")).join("")}
         </div>
         <button class="btn" type="submit">Добавить замер</button>
         ${dateDoc && dateDoc.entries && dateDoc.entries.length ? `<span class="hint" style="margin-left:10px;">на ${fmtD(entryDate)} уже внесено замеров: ${dateDoc.entries.length}</span>`:""}
@@ -1613,7 +1639,7 @@ function renderTemp(){
     <div class="panel-body table-wrap">
       <table><thead><tr><th>Время</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th></th></tr></thead>
       <tbody>${viewDoc && viewDoc.entries && viewDoc.entries.length ? viewDoc.entries.map((e,i)=>`
-        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${e.values&&e.values[p]!==undefined?fmtN(e.values[p],1):"–"}</td>`).join("")}
+        <tr><td>${esc(e.time||"—")}</td>${POOLS.map(p=>`<td class="num">${entryCellText(e.values&&e.values[p], 1)}</td>`).join("")}
         <td><button class="btn danger" data-del-temp-entry="${esc(viewDate)}:${i}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+2}">Нет замеров на эту дату</td></tr>`}
       </tbody>
       ${viewDoc && viewDoc.entries && viewDoc.entries.length ? `<tfoot><tr style="font-weight:700;"><td>Среднее</td>${POOLS.map(p=>{
@@ -2355,7 +2381,10 @@ function wireActiveSection(){
       const f = new FormData(o2Form);
       const date = f.get("date"), time = f.get("time");
       const values = {};
-      POOLS.forEach(p=>{ const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v); });
+      POOLS.forEach(p=>{
+        if(f.get("nz_"+p)){ values[p]=NZ; return; }
+        const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v);
+      });
       const existing = state.o2[date] || {date, entries:[]};
       const entries = [...(existing.entries||[]), {time, values}];
       await Store.setDoc(pcol("o2"), date, {date, entries});
@@ -2384,7 +2413,10 @@ function wireActiveSection(){
       const f = new FormData(tempForm);
       const date = f.get("date"), time = f.get("time");
       const values = {};
-      POOLS.forEach(p=>{ const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v); });
+      POOLS.forEach(p=>{
+        if(f.get("nz_"+p)){ values[p]=NZ; return; }
+        const v=f.get("p_"+p); if(v!==null && v!=="") values[p]=Number(v);
+      });
       const existing = state.temperature[date] || {date, entries:[]};
       const entries = [...(existing.entries||[]), {time, values}];
       await Store.setDoc(pcol("temperature"), date, {date, entries});
@@ -2402,6 +2434,15 @@ function wireActiveSection(){
       toast("Замер удалён");
     }));
   }
+
+  const nzInputs = {};
+  main.querySelectorAll("[data-nz-input]").forEach(inp=>{ nzInputs[inp.dataset.nzInput] = inp; });
+  main.querySelectorAll("[data-nz-check]").forEach(chk=>{
+    const input = nzInputs[chk.dataset.nzCheck];
+    const sync = ()=>{ if(!input) return; input.disabled = chk.checked; if(chk.checked) input.value = ""; };
+    chk.addEventListener("change", sync);
+    sync();
+  });
 
   const treatForm = document.getElementById("treatForm");
   if(treatForm){
@@ -2628,7 +2669,11 @@ function buildWorkbook_o2(){
   const aoaAvg = [["Дата", ...POOLS.map(poolLabelRaw)]];
   dates.forEach(d=>{
     const doc = state.o2[d];
-    (doc.entries||[]).forEach(e=> aoaEntries.push([fmtDRaw(d), e.time||"", ...POOLS.map(p=> e.values&&e.values[p]!==undefined? num(e.values[p]) : "")]));
+    (doc.entries||[]).forEach(e=> aoaEntries.push([fmtDRaw(d), e.time||"", ...POOLS.map(p=>{
+      const v = e.values && e.values[p];
+      if(isNZ(v)) return NZ;
+      return v!==undefined ? num(v) : "";
+    })]));
     const avg = o2DailyAvg(doc);
     aoaAvg.push([fmtDRaw(d), ...POOLS.map(p=> avg[p]!==undefined? Number(avg[p].toFixed(2)) : "")]);
   });
@@ -2643,8 +2688,12 @@ function buildWorkbook_temp(){
   const aoa = [["Дата","Время", ...POOLS.map(p=>poolLabelRaw(p)), "Среднее по замеру"]];
   rows.forEach(r=>{
     (r.entries||[]).forEach(e=>{
-      const vals = POOLS.map(p=> e.values&&e.values[p]!==undefined ? num(e.values[p]) : "");
-      const nums = vals.filter(v=> v!=="" );
+      const vals = POOLS.map(p=>{
+        const v = e.values && e.values[p];
+        if(isNZ(v)) return NZ;
+        return v!==undefined ? num(v) : "";
+      });
+      const nums = vals.filter(v=> v!=="" && v!==NZ );
       const mean = nums.length ? Number((nums.reduce((a,b)=>a+b,0)/nums.length).toFixed(2)) : "";
       aoa.push([fmtDRaw(r.date), e.time||"", ...vals, mean]);
     });
