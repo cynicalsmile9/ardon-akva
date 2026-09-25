@@ -568,6 +568,29 @@ function roleLabel(r){
 // Самостоятельная регистрация отключена в Firebase Authentication:
 // аккаунты заводит администратор, поэтому формы регистрации в приложении нет.
 
+// Смена пароля прямо в приложении: Firebase сначала переспрашивает текущий
+// пароль (reauthenticate), затем меняет его. Письма и одноразовые ссылки
+// в этом пути не участвуют.
+async function handlePasswordChange(current, next, next2){
+  if(!current || !next || !next2) return { ok:false, msg:"Заполните все три поля" };
+  if(next !== next2) return { ok:false, msg:"Новые пароли не совпадают" };
+  if(next === current) return { ok:false, msg:"Новый пароль совпадает с текущим" };
+  if(!auth || !auth.currentUser) return { ok:false, msg:"Нет связи с сервером" };
+  try{
+    const user = auth.currentUser;
+    const cred = firebase.auth.EmailAuthProvider.credential(user.email, current);
+    await user.reauthenticateWithCredential(cred);
+    await user.updatePassword(next);
+    return { ok:true };
+  }catch(err){
+    const code = (err && err.code) || "";
+    if(code === "auth/invalid-credential" || code === "auth/wrong-password"){
+      return { ok:false, msg:"Текущий пароль указан неверно" };
+    }
+    return { ok:false, msg: authErrorMessage(err) };
+  }
+}
+
 async function handleLogin(emailRaw, password){
   const email = (emailRaw||"").trim();
   if(!email || !password) return { ok:false, msg:"Заполните почту и пароль" };
@@ -592,9 +615,16 @@ function updateNavUser(){
   const el = document.getElementById("navUser");
   if(!el) return;
   if(!currentUser){ el.innerHTML = ""; return; }
-  el.innerHTML = `<div class="user-badge"><span>&#128100;</span><span class="who">${esc(currentUser.username)}</span><button class="btn ghost small" id="logoutBtn" style="margin-left:auto;">Выйти</button></div>`;
+  el.innerHTML = `<div class="user-badge"><span>&#128100;</span><span class="who">${esc(currentUser.username)}</span><button class="btn ghost small" id="pwdBtn" style="margin-left:auto;">Пароль</button><button class="btn ghost small" id="logoutBtn">Выйти</button></div>`;
   const btn = document.getElementById("logoutBtn");
   if(btn) btn.addEventListener("click", logout);
+  const pwd = document.getElementById("pwdBtn");
+  if(pwd) pwd.addEventListener("click", ()=>{
+    renderPassword._err = ""; renderPassword._done = "";
+    activeSection = "password";
+    document.querySelectorAll(".nav-btn").forEach(b=>b.classList.remove("active"));
+    renderActive();
+  });
 }
 
 function renderAuthScreen(){
@@ -941,7 +971,8 @@ function renderActive(){
   const renderers = {
     plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
-    summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp
+    summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp,
+    password: renderPassword
   };
   const needsPools = ["stocking","transfers","mortality","incidents","feed","naveski","o2","treat"].includes(activeSection);
   if(needsPools && POOLS.length === 0){
@@ -956,6 +987,29 @@ function renderActive(){
     main.innerHTML = renderers[activeSection] ? renderers[activeSection]() : "";
   }
   wireActiveSection();
+}
+
+function renderPassword(){
+  const err = renderPassword._err || "";
+  const done = renderPassword._done || "";
+  return `
+  ${topbar("Смена пароля", "Пароль проверяет и меняет сервер Firebase — приложение его не видит и не хранит")}
+  <div class="panel">
+    <div class="panel-head"><h2>Новый пароль</h2></div>
+    <div class="panel-body">
+      ${done ? `<div class="alert good" style="margin-bottom:14px;">${esc(done)}</div>` : ""}
+      <form id="passwordForm" style="max-width:420px;">
+        <div class="field"><label>Текущий пароль</label><input type="password" name="current" autocomplete="current-password" required></div>
+        <div class="field"><label>Новый пароль</label><input type="password" name="next" autocomplete="new-password" required></div>
+        <div class="field"><label>Повторите новый пароль</label><input type="password" name="next2" autocomplete="new-password" required></div>
+        <button class="btn" type="submit">Сменить пароль</button>
+      </form>
+      ${err ? `<div class="auth-error" style="margin-top:14px;">${esc(err)}</div>` : ""}
+      <p class="hint" style="margin-top:16px; line-height:1.6;">
+        Требования сервера: не короче 10 символов, обязательны заглавная и строчная буквы, цифра и спецсимвол.
+      </p>
+    </div>
+  </div>`;
 }
 
 function topbar(title, sub, extra){
@@ -2092,6 +2146,24 @@ function wireActiveSection(){
     if(pendingBtn) pendingBtn.addEventListener("click", logout);
     return;
   }
+
+  const passwordForm = document.getElementById("passwordForm");
+  if(passwordForm) passwordForm.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const f = new FormData(passwordForm);
+    const btn = passwordForm.querySelector("button[type=submit]");
+    if(btn) btn.disabled = true;
+    try{
+      const res = await handlePasswordChange(f.get("current"), f.get("next"), f.get("next2"));
+      renderPassword._err = res.ok ? "" : res.msg;
+      renderPassword._done = res.ok ? "Пароль изменён. В следующий раз входите с новым паролем." : "";
+    }catch(err){
+      console.error("password change failed", err);
+      renderPassword._err = "Не удалось сменить пароль, попробуйте ещё раз";
+      renderPassword._done = "";
+    }
+    finally{ if(btn) btn.disabled = false; renderActive(); }
+  });
 
   main.querySelectorAll("[data-export]").forEach(btn=>{
     btn.addEventListener("click", ()=> handleExport(btn.dataset.export));
