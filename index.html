@@ -219,6 +219,10 @@
     <button class="nav-btn" data-sec="o2"><span class="ic">&#8776;</span>Кислород О2</button>
     <button class="nav-btn" data-sec="temp"><span class="ic">&#8451;</span>Температура</button>
     <button class="nav-btn" data-sec="treat"><span class="ic">&#9877;</span>Обработки</button>
+    <div class="sec-label">Расчёт и экономика</div>
+    <button class="nav-btn" data-sec="plan"><span class="ic">&#128201;</span>Расчёт роста</button>
+    <button class="nav-btn" data-sec="cost"><span class="ic">&#8381;</span>Себестоимость</button>
+    <button class="nav-btn" data-sec="feeds"><span class="ic">&#127859;</span>Корма и нормы</button>
     <div class="sec-label">Отчёты</div>
     <button class="nav-btn" data-sec="population"><span class="ic">&#128031;</span>Численность стада</button>
     <button class="nav-btn" data-sec="summary"><span class="ic">&#9776;</span>Сводка</button>
@@ -287,7 +291,7 @@ let db = null;
 let auth = null;
 let dbAvailable = false;
 let downloadsCap = null;
-const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{} };
+const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{}, feeds:{}, settings:{}, plans:{}, expenses:{} };
 const memWatchers = {};
 
 function memNotify(col){ (memWatchers[col]||[]).forEach(fn=>fn()); }
@@ -343,7 +347,7 @@ const Store = {
    Справочник кормов, пользователи и архив изменений — общие на всё
    хозяйство, отдельно по участкам не делятся.
    ------------------------------------------------------------------- */
-const PLOT_SCOPED_COLLECTIONS = ["stocking","mortality","feed","o2","temperature","treatments","transfers","incidents","naveski","population"];
+const PLOT_SCOPED_COLLECTIONS = ["stocking","mortality","feed","o2","temperature","treatments","transfers","incidents","naveski","population","plans","expenses"];
 const LEGACY_PLOT_ID = "legacy";
 let currentPlotId = null;
 let plotUnsubs = [];
@@ -426,10 +430,12 @@ async function onPlotsChanged(data){
    Live state, kept in sync by the watchers below.
    ------------------------------------------------------------------- */
 const state = {
-  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{}
+  stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{},
+  feeds:{}, settings:{}, plans:{}, expenses:{}
 };
 let renderQueued = false;
 function scheduleRender(){
+  econVersion++; // данные изменились — кэш расчётов экономики устарел
   if(renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(()=>{ renderQueued=false; renderActive(); });
@@ -516,7 +522,7 @@ function startDataStore(){
   if(dataStoreStarted) return;
   dataStoreStarted = true;
   // Общие на всё хозяйство коллекции — не зависят от выбранного участка.
-  ["catalog","archive"].forEach(col=>{
+  ["catalog","archive","feeds","settings"].forEach(col=>{
     Store.watchCollection(col, data=>{ state[col]=data; scheduleRender(); });
   });
   // Участки и, следом за ними, их собственные журналы (см. onPlotsChanged).
@@ -914,7 +920,8 @@ function dayTotal(obj, field){
    ------------------------------------------------------------------- */
 const SECTION_NAMES = {
   stocking:"Зарыбление", transfers:"Пересадки", mortality:"Отход", incidents:"ЧП", feed:"Кормление", naveski:"Навески",
-  o2:"Кислород О2", temperature:"Температура", treatments:"Обработки", catalog:"Справочник кормов"
+  o2:"Кислород О2", temperature:"Температура", treatments:"Обработки", catalog:"Справочник кормов",
+  feeds:"Корма и нормы", plans:"Расчёт роста", expenses:"Прочие затраты"
 };
 
 async function archiveSnapshot(col, docId, oldData, action){
@@ -967,13 +974,22 @@ function formatSnapshot(col, data){
   if(col === "treatments"){
     return `${(data.events||[]).length} обработок(и) за день`;
   }
+  if(col === "feeds"){
+    return `${data.name||""} · ${(data.rows||[]).length} строк норм · ${(data.prices||[]).length} цен${data.active===false?" · не используется":""}`;
+  }
+  if(col === "plans"){
+    return `${data.name||"план"} · старт ${fmtDRaw(data.startDate)} · ${fmtN(data.count)} шт. по ${fmtN(data.weightG,2)} г`;
+  }
+  if(col === "expenses"){
+    return `${data.category||""} · ${fmtN(data.amount,2)} руб${data.pool?" · "+poolLabelRaw(data.pool):""}${data.comment?" · "+data.comment:""}`;
+  }
   return JSON.stringify(data);
 }
 
 /* ---------------------------------------------------------------------
    Shell / navigation
    ------------------------------------------------------------------- */
-const SECTIONS = ["plots","dash","stocking","transfers","mortality","incidents","feed","naveski","o2","temp","treat","population","summary","charts","catalog","archive","help"];
+const SECTIONS = ["plots","dash","stocking","transfers","mortality","incidents","feed","naveski","o2","temp","treat","plan","cost","feeds","population","summary","charts","catalog","archive","help"];
 let activeSection = "dash";
 document.querySelectorAll(".nav-btn").forEach(btn=>{
   btn.addEventListener("click", ()=>{
@@ -1014,6 +1030,7 @@ function renderActive(){
     plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
     summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp,
+    plan: renderPlan, cost: renderCost, feeds: renderFeeds,
     password: renderPassword
   };
   const needsPools = ["stocking","transfers","mortality","incidents","feed","naveski","o2","treat"].includes(activeSection);
@@ -1176,6 +1193,8 @@ function renderDash(){
     <div class="card"><div class="label">Стадо, всего</div><div class="value">${fmtN(totalPop)}<small> шт.</small></div><div class="delta">${activePools} бассейнов зарыблено</div></div>
     <div class="card"><div class="label">Отход за день</div><div class="value">${fmtN(todayMortTotal)}<small> шт.</small></div><div class="delta">среднее за 7 дн.: ${fmtN(avgPrevMort,1)}</div></div>
     <div class="card"><div class="label">Корм за день</div><div class="value">${fmtN(feedUsed,1)}<small> кг</small></div><div class="delta">по всем бассейнам</div></div>
+    ${(()=>{ if(!last) return ""; const nf = econDayNormFact(last); return `<div class="card"><div class="label">Корм к норме</div><div class="value">${nf.norm!==null?fmtN(nf.norm,1):"—"}<small> кг норма</small></div><div class="delta">факт ${fmtN(nf.fact,1)} кг ${nf.norm?econDevTag(econPct(nf.fact,nf.norm),"abs"):""}</div></div>`; })()}
+    ${(()=>{ if(!last) return ""; const st = econFactState(POOLS, last); return `<div class="card"><div class="label">Себестоимость</div><div class="value">${st.costPerKg!==null?fmtN(st.costPerKg,1):"—"}<small> руб/кг</small></div><div class="delta">стадо ${fmtN(st.cost,0)} руб</div></div>`; })()}
     <div class="card"><div class="label">О2 средний</div><div class="value">${o2Avg!==null?fmtN(o2Avg,2):"—"}<small> мг/л</small></div><div class="delta">${tempMain!==undefined && tempMain!==null ? "температура "+fmtN(tempMain,1)+"°C" : ""}</div></div>
   </div>
   <div class="two-col">
@@ -1212,6 +1231,10 @@ function renderStocking(){
           <div class="field"><label>Навеска, кг</label><input type="number" step="0.001" name="weight" placeholder="0.007"></div>
           <div class="field"><label>Количество, шт.</label><input type="number" step="1" name="count" placeholder="101000" required></div>
         </div>
+        <div class="row">
+          <div class="field"><label>Цена малька, руб/кг</label><input type="number" step="0.01" min="0" name="price" placeholder="300"></div>
+          <div class="field"><label>или стоимость партии, руб</label><input type="number" step="0.01" min="0" name="cost" placeholder="если известна сумма"></div>
+        </div>
         <div class="field"><label>Комментарий</label><input type="text" name="comment" placeholder="напр. поставщик, партия"></div>
         <button class="btn" type="submit">Добавить зарыбление</button>
       </form>
@@ -1220,16 +1243,17 @@ function renderStocking(){
   <div class="panel">
     <div class="panel-head"><h2>История зарыбления</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${rows.length} записей</span>${exportButton("stocking")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th><th>Бассейн</th><th>Навеска, кг</th><th>Кол-во, шт.</th><th>Биомасса, кг</th><th>Комментарий</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th><th>Бассейн</th><th>Навеска, кг</th><th>Кол-во, шт.</th><th>Биомасса, кг</th><th>Стоимость, руб</th><th>Комментарий</th><th></th></tr></thead>
       <tbody>${rows.length? rows.map(([id,r])=>`
         <tr>
           <td>${fmtD(r.date)}</td><td>${poolLabel(r.pool)}</td>
           <td class="num">${r.weight?fmtN(r.weight,3):"—"}</td>
           <td class="num">${fmtN(r.count)}</td>
           <td class="num">${r.weight?fmtN(r.weight*num(r.count),1):"—"}</td>
+          <td class="num">${(r.cost!==undefined&&r.cost!==null&&r.cost!=="") ? fmtN(r.cost,0) : (num(r.price)>0 && r.weight ? fmtN(num(r.price)*r.weight*num(r.count),0) : '<span class="hint">нет цены</span>')}</td>
           <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
           <td><button class="btn danger" data-del="stocking:${esc(id)}">удалить</button></td>
-        </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Пока нет записей</td></tr>`}
+        </tr>`).join("") : `<tr class="empty-row"><td colspan="8">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -1433,7 +1457,7 @@ function renderFeed(){
   const existing = state.feed[editDate];
   const dateList = Object.values(state.feed).sort((a,b)=>b.date.localeCompare(a.date));
   return `
-  ${topbar("Кормление", "Расход и возврат корма по бассейнам — итог считается автоматически")}
+  ${topbar("Кормление", "Расход и возврат корма по бассейнам, норма на фактическое стадо и отклонение от неё")}
   <div class="panel">
     <div class="panel-head"><h2>Внести кормление за день</h2></div>
     <div class="panel-body">
@@ -1447,6 +1471,7 @@ function renderFeed(){
         <div class="grid-entry">
           ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="r_${p}" value="${existing&&existing.returned&&existing.returned[p]!==undefined? esc(existing.returned[p]):0}"></div>`).join("")}
         </div>
+        ${renderFeedNormBlock(editDate, existing)}
         <button class="btn" type="submit">Сохранить кормление</button>
       </form>
     </div>
@@ -1454,7 +1479,7 @@ function renderFeed(){
   <div class="panel">
     <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней · в ячейках бассейнов: расход / возврат, кг</span>${exportButton("feed")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th>Расход, итого</th><th>Возврат, итого</th><th>Чистый расход</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th>Расход, итого</th><th>Возврат, итого</th><th>Чистый расход</th><th>Норма, кг</th><th>Откл.</th><th></th></tr></thead>
       <tbody>${dateList.length? dateList.map(r=>{
         const u = dayTotal(r,"used"), ret = dayTotal(r,"returned");
         return `<tr><td>${fmtD(r.date)}</td>
@@ -1464,8 +1489,9 @@ function renderFeed(){
           return pu||pr ? `<td class="num">${fmtN(pu,1)} / ${fmtN(pr,1)}</td>` : `<td class="num hint">–</td>`;
         }).join("")}
         <td class="num">${fmtN(u,1)}</td><td class="num">${fmtN(ret,1)}</td><td class="num"><b>${fmtN(u-ret,1)}</b></td>
+        ${(()=>{ const nf = econDayNormFact(r.date); return nf.norm!==null ? `<td class="num">${fmtN(nf.norm,1)}</td><td>${econDevTag(econPct(nf.fact, nf.norm), "abs")}</td>` : `<td class="num hint">–</td><td></td>`; })()}
         <td><button class="btn ghost small" data-edit-feed="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="feed:${esc(r.date)}">удалить</button></td></tr>`;
-      }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+5}">Пока нет записей</td></tr>`}
+      }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+7}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -2156,6 +2182,10 @@ function renderHelp(){
     <p>4. Раздел <b>«Обработки»</b> — фиксируйте препараты и дозировки по бассейнам.</p>
     <p>5. Раздел <b>«ЧП»</b> — для происшествий, из-за которых погибла рыба (авария, отключение электричества, замор и т.п.), отдельно от обычного ежедневного отхода. Укажите дату, бассейн, сколько погибло и опишите, что случилось. Это число сразу прибавляется к обычному отходу и автоматически учитывается в остатке стада, на дашборде, в сводке и на графиках — вносить его повторно в «Отход» не нужно.</p>
     <p>6. Раздел <b>«Навески»</b> — периодически (например, раз в 1–2 недели) взвешивайте рыбу и вносите среднюю навеску (кг на одну рыбу) по каждому бассейну. По этим замерам программа сама считает <b>кормовой коэффициент</b> за выбранный период отдельно для каждого бассейна: берётся последний замер навески на начало и на конец периода, прирост биомассы = остаток стада × навеска на эти даты, а корм суммируется за дни между замерами. Кормовой коэффициент = корм за период (кг) ÷ прирост биомассы (кг).</p>
+    <p>7. Раздел <b>«Корма и нормы»</b> — справочник кормов производителей: таблица норм кормления (% от массы рыбы в сутки по навескам и температуре), ожидаемый кормовой коэффициент и цены по датам. Новый корм добавляется вставкой таблицы из Excel; новая цена — одной строкой «с даты». Старые цены остаются: по ним пересчитывается себестоимость прошлых дней.</p>
+    <p>8. В <b>«Кормлении»</b> под полями расхода показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение факта от неё — сразу, пока вводите цифры. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
+    <p>9. <b>«Расчёт роста»</b> — план выращивания по бассейну или по всему участку : привес = навеска × норма корма ÷ кормовой коэффициент, отход — фактический процент хозяйства (или заданный вручную), температуры — по журналу «Температура». План фиксирует нормы и цены на момент создания; сравнение с фактом — по кормлению, взвешиваниям, численности, затратам и себестоимости 1 кг.</p>
+    <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (цена при зарыблении), корм (чистый расход × цена выбранного корма на дату), кислород (кг О2 на кг корма × цена), прочие затраты. При пересадке затраты переходят вместе с рыбой, при продаже списываются.</p>
     <h3>Что считается автоматически</h3>
     <p>— Остаток стада по каждому бассейну (зарыбление плюс пересадки минус накопленный отход, включая отход по ЧП) — отдельным разделом <b>«Численность стада»</b> с историей по дням, по аналогии с «Отходом».<br>
     — Итоги по кормлению и отходу за день (журнал «Отход» + «ЧП» вместе).<br>
@@ -2277,7 +2307,9 @@ function wireActiveSection(){
     await Store.addDoc(pcol("stocking"), {
       date: f.get("date"), pool: f.get("pool"),
       weight: f.get("weight")? Number(f.get("weight")) : null,
-      count: Number(f.get("count")), comment: f.get("comment")||""
+      count: Number(f.get("count")), comment: f.get("comment")||"",
+      price: f.get("price")? Number(f.get("price")) : null,
+      cost: f.get("cost")? Number(f.get("cost")) : null
     });
     stockingForm.reset();
     toast("Зарыбление добавлено");
@@ -2333,10 +2365,14 @@ function wireActiveSection(){
       e.preventDefault();
       const f = new FormData(feedForm);
       const date = f.get("date");
-      const used = {}, returned = {};
-      POOLS.forEach(p=>{ used[p]=num(f.get("u_"+p)); returned[p]=num(f.get("r_"+p)); });
+      const used = {}, returned = {}, kinds = {};
+      POOLS.forEach(p=>{
+        used[p]=num(f.get("u_"+p)); returned[p]=num(f.get("r_"+p));
+        // корм по бассейну: выбранный вручную, иначе — положенный по навеске на эту дату
+        if(used[p] > 0){ const k = f.get("k_"+p) || econDefaultKind(p, date); if(k) kinds[p] = k; }
+      });
       const old = state.feed[date];
-      await Store.setDoc(pcol("feed"), date, {date, used, returned});
+      await Store.setDoc(pcol("feed"), date, {date, used, returned, kinds});
       if(old) await archiveSnapshot("feed", date, old, "edit");
       toast("Кормление за "+fmtD(date)+" сохранено");
     });
@@ -2570,7 +2606,1326 @@ function wireActiveSection(){
     toast("Бассейн убран из участка");
   }));
 
+  wireEcon(main);
   if(activeSection === "charts") drawCharts();
+}
+
+/* =====================================================================
+   ЭКОНОМИКА — ядро расчёта (без интерфейса)
+   Справочник кормов с нормами производителя и ценами, модель роста
+   (перенос листа «куркулятар» из «Расчет роста рыбы.xlsb»), нормы
+   кормления на фактическое стадо, учёт фактической себестоимости.
+   ===================================================================== */
+// @@ECON_ENGINE_START
+// Форелевые корма производителей с их сайтов (кнопка «Добавить корма производителей»):
+// состав (протеин, жир, астаксантин), фракции и строки опубликованной таблицы норм,
+// подходящие под фракции корма. Добавляются выключенными — включаете нужные сами.
+const ECON_CATALOG = [{"name":"Aquarex Форель старт 61/11 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0,"wTo":0.15,"fraction":0.4,"fcr":null,"rates":[1.6,2.1,2.6,3.15,3.75,4.4,5.1,5.75,4.82,null]},{"wFrom":0.15,"wTo":0.5,"fraction":0.7,"fcr":null,"rates":[1.47,1.9,2.38,2.9,3.43,4.0,4.55,5.17,4.28,null]}],"prices":[],"specs":{"type":"стартовый","protein":61,"fat":11,"astaxanthin":"нет в составе","fractions":"0,2–0,4 / 0,4–0,7","url":"https://www.aqua-rex.ru/ru/forel/forel-start-61-11"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель старт 59/14 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0.15,"wTo":0.5,"fraction":0.7,"fcr":null,"rates":[1.47,1.9,2.38,2.9,3.43,4.0,4.55,5.17,4.28,null]},{"wFrom":0.5,"wTo":1.0,"fraction":0.9,"fcr":null,"rates":[1.15,1.55,1.95,2.4,2.85,3.3,3.75,4.15,3.36,null]}],"prices":[],"specs":{"type":"стартовый","protein":59,"fat":14,"astaxanthin":"нет в составе","fractions":"0,4–0,7 / 0,7–0,9","url":"https://www.aqua-rex.ru/ru/forel/forel-start-59-14"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель старт 56/16 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":1.0,"wTo":3.0,"fraction":1.2,"fcr":null,"rates":[1.0,1.41,1.82,2.21,2.58,3.01,3.45,3.85,3.15,null]},{"wFrom":3.0,"wTo":5.0,"fraction":1.6,"fcr":null,"rates":[0.9,1.25,1.62,2.0,2.35,2.75,3.15,3.55,2.9,null]}],"prices":[],"specs":{"type":"стартовый","protein":56,"fat":16,"astaxanthin":"нет в составе","fractions":"0,9–1,2 / 1,2–1,6","url":"https://www.aqua-rex.ru/ru/forel/forel-start-56-16"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель старт 52/18 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":5,"wTo":20,"fraction":2.0,"fcr":null,"rates":[0.74,1.05,1.4,1.75,2.1,2.45,2.85,3.25,2.7,2.31]}],"prices":[],"specs":{"type":"стартовый","protein":52,"fat":18,"astaxanthin":"нет в составе","fractions":"1,6–2,0","url":"https://www.aqua-rex.ru/ru/forel/forel-start-52-18"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 46/21 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":20,"wTo":50,"fraction":2.5,"fcr":null,"rates":[0.55,0.83,1.15,1.45,1.8,2.14,2.6,2.95,2.5,2.15]},{"wFrom":50,"wTo":100,"fraction":3.5,"fcr":null,"rates":[0.45,0.72,0.98,1.26,1.6,1.95,2.3,2.78,2.3,1.94]}],"prices":[],"specs":{"type":"продукционный","protein":46,"fat":21,"astaxanthin":"нет в составе","fractions":"2,5; 3,5","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-46-21"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 44/23 УЗВ","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.41,0.66,0.9,1.15,1.45,1.78,2.12,2.48,2.08,1.71]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.37,0.6,0.82,1.06,1.3,1.59,1.9,2.25,1.85,1.53]},{"wFrom":300,"wTo":500,"fraction":4.5,"fcr":null,"rates":[0.33,0.54,0.74,0.96,1.21,1.42,1.75,2.1,1.71,1.38]},{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]}],"prices":[],"specs":{"type":"продукционный (УЗВ)","protein":44,"fat":23,"astaxanthin":"нет в составе","fractions":"4,5; 6,0","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-44-23-uzv"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 42/24","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]}],"prices":[],"specs":{"type":"продукционный","protein":42,"fat":24,"astaxanthin":"нет в составе","fractions":"6,0; 9,0","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-42-24-uzv"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 42/24 УЗВ","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]}],"prices":[],"specs":{"type":"продукционный (УЗВ)","protein":42,"fat":24,"astaxanthin":"нет в составе","fractions":"6,0; 9,0","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-42-24"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 40/27","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":20,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]},{"wFrom":2000,"wTo":5000,"fraction":11.0,"fcr":null,"rates":[0.19,0.32,0.44,0.58,0.78,0.95,1.25,1.65,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":40,"fat":27,"astaxanthin":"нет в составе","fractions":"6,0; 9,0; 11,0","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-40-27"},"source":"aqua-rex.ru/ru/forel — общая таблица «Стартовые и продукционные комбикорма» (одна на все корма ВНИРО), кг на 100 кг рыбы в сутки; строки взяты по фракциям этого корма. 20 °C для мелочи — «по поедаемости». Перекрывающиеся диапазоны 0,9–3,0 и 2,5–5,0 г сдвинуты на 1–3 и 3–5 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель старт 55/13 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":21,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0,"wTo":0.2,"fraction":0.4,"fcr":null,"rates":[1.41,1.83,2.28,2.74,3.45,4.16,4.57,4.98,4.33,null]},{"wFrom":0.2,"wTo":0.4,"fraction":0.6,"fcr":null,"rates":[1.37,1.79,2.24,2.68,3.34,4.04,4.38,4.67,4.22,null]},{"wFrom":0.4,"wTo":0.8,"fraction":0.7,"fcr":null,"rates":[1.34,1.76,2.2,2.63,3.28,3.93,4.19,4.36,4.11,null]},{"wFrom":0.8,"wTo":0.9,"fraction":0.9,"fcr":null,"rates":[1.28,1.71,2.13,2.55,3.18,3.81,4.07,4.23,3.99,null]},{"wFrom":0.9,"wTo":1.3,"fraction":1.2,"fcr":null,"rates":[1.24,1.66,2.06,2.47,3.09,3.7,3.95,4.11,3.87,null]},{"wFrom":1.3,"wTo":5.0,"fraction":1.6,"fcr":null,"rates":[1.17,1.6,1.99,2.39,2.99,3.59,3.83,3.99,3.75,null]}],"prices":[],"specs":{"type":"стартовый","protein":55,"fat":13,"astaxanthin":"есть, кол-во не указано","fractions":"не указаны","url":"https://www.aqua-rex.ru/ru/forel/forel-start-55-13"},"source":"aqua-rex.ru — на странице корма опубликована только стартовая таблица до 5 г (одинаковая у кормов 55/13, 50/17, 43/19 и 44/23; 20 °C — «по поедаемости»; перекрытия 0,4–0,8/0,7–0,9 и 0,9–1,3/1,2–5,0 г сдвинуты). Фракции и диапазон навесок корма не указаны. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель сеголетки 50/17 ВНИРО","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":21,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0,"wTo":0.2,"fraction":0.4,"fcr":null,"rates":[1.41,1.83,2.28,2.74,3.45,4.16,4.57,4.98,4.33,null]},{"wFrom":0.2,"wTo":0.4,"fraction":0.6,"fcr":null,"rates":[1.37,1.79,2.24,2.68,3.34,4.04,4.38,4.67,4.22,null]},{"wFrom":0.4,"wTo":0.8,"fraction":0.7,"fcr":null,"rates":[1.34,1.76,2.2,2.63,3.28,3.93,4.19,4.36,4.11,null]},{"wFrom":0.8,"wTo":0.9,"fraction":0.9,"fcr":null,"rates":[1.28,1.71,2.13,2.55,3.18,3.81,4.07,4.23,3.99,null]},{"wFrom":0.9,"wTo":1.3,"fraction":1.2,"fcr":null,"rates":[1.24,1.66,2.06,2.47,3.09,3.7,3.95,4.11,3.87,null]},{"wFrom":1.3,"wTo":5.0,"fraction":1.6,"fcr":null,"rates":[1.17,1.6,1.99,2.39,2.99,3.59,3.83,3.99,3.75,null]},{"wFrom":5,"wTo":20,"fraction":2.0,"fcr":null,"rates":[0.74,1.05,1.4,1.75,2.1,2.45,2.85,3.25,2.7,2.31]},{"wFrom":20,"wTo":50,"fraction":2.5,"fcr":null,"rates":[0.55,0.83,1.15,1.45,1.8,2.14,2.6,2.95,2.5,2.15]},{"wFrom":50,"wTo":100,"fraction":3.5,"fcr":null,"rates":[0.45,0.72,0.98,1.26,1.6,1.95,2.3,2.78,2.3,1.94]},{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.41,0.66,0.9,1.15,1.45,1.78,2.12,2.48,2.08,1.71]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.37,0.6,0.82,1.06,1.3,1.59,1.9,2.25,1.85,1.53]},{"wFrom":300,"wTo":500,"fraction":4.5,"fcr":null,"rates":[0.33,0.54,0.74,0.96,1.21,1.42,1.75,2.1,1.71,1.38]},{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]},{"wFrom":2000,"wTo":5000,"fraction":11.0,"fcr":null,"rates":[0.19,0.32,0.44,0.58,0.78,0.95,1.25,1.65,1.3,1.0]}],"prices":[],"specs":{"type":"стартовый (сеголетки)","protein":50,"fat":17,"astaxanthin":"есть, кол-во не указано","fractions":"не указаны","url":"https://www.aqua-rex.ru/ru/forel/forel-segoletki-50-17"},"source":"aqua-rex.ru — на странице корма опубликована только стартовая таблица до 5 г (одинаковая у кормов 55/13, 50/17, 43/19 и 44/23; 20 °C — «по поедаемости»; перекрытия 0,4–0,8/0,7–0,9 и 0,9–1,3/1,2–5,0 г сдвинуты). Фракции и диапазон навесок корма не указаны. Для навесок от 5 г подставлена общая таблица Aquarex (ВНИРО) с сайта — уточните у производителя. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 44/23","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":21,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0,"wTo":0.2,"fraction":0.4,"fcr":null,"rates":[1.41,1.83,2.28,2.74,3.45,4.16,4.57,4.98,4.33,null]},{"wFrom":0.2,"wTo":0.4,"fraction":0.6,"fcr":null,"rates":[1.37,1.79,2.24,2.68,3.34,4.04,4.38,4.67,4.22,null]},{"wFrom":0.4,"wTo":0.8,"fraction":0.7,"fcr":null,"rates":[1.34,1.76,2.2,2.63,3.28,3.93,4.19,4.36,4.11,null]},{"wFrom":0.8,"wTo":0.9,"fraction":0.9,"fcr":null,"rates":[1.28,1.71,2.13,2.55,3.18,3.81,4.07,4.23,3.99,null]},{"wFrom":0.9,"wTo":1.3,"fraction":1.2,"fcr":null,"rates":[1.24,1.66,2.06,2.47,3.09,3.7,3.95,4.11,3.87,null]},{"wFrom":1.3,"wTo":5.0,"fraction":1.6,"fcr":null,"rates":[1.17,1.6,1.99,2.39,2.99,3.59,3.83,3.99,3.75,null]},{"wFrom":5,"wTo":20,"fraction":2.0,"fcr":null,"rates":[0.74,1.05,1.4,1.75,2.1,2.45,2.85,3.25,2.7,2.31]},{"wFrom":20,"wTo":50,"fraction":2.5,"fcr":null,"rates":[0.55,0.83,1.15,1.45,1.8,2.14,2.6,2.95,2.5,2.15]},{"wFrom":50,"wTo":100,"fraction":3.5,"fcr":null,"rates":[0.45,0.72,0.98,1.26,1.6,1.95,2.3,2.78,2.3,1.94]},{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.41,0.66,0.9,1.15,1.45,1.78,2.12,2.48,2.08,1.71]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.37,0.6,0.82,1.06,1.3,1.59,1.9,2.25,1.85,1.53]},{"wFrom":300,"wTo":500,"fraction":4.5,"fcr":null,"rates":[0.33,0.54,0.74,0.96,1.21,1.42,1.75,2.1,1.71,1.38]},{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]},{"wFrom":2000,"wTo":5000,"fraction":11.0,"fcr":null,"rates":[0.19,0.32,0.44,0.58,0.78,0.95,1.25,1.65,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":44,"fat":23,"astaxanthin":"есть, кол-во не указано","fractions":"не указаны","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-44-23"},"source":"aqua-rex.ru — на странице корма опубликована только стартовая таблица до 5 г (одинаковая у кормов 55/13, 50/17, 43/19 и 44/23; 20 °C — «по поедаемости»; перекрытия 0,4–0,8/0,7–0,9 и 0,9–1,3/1,2–5,0 г сдвинуты). Фракции и диапазон навесок корма не указаны. Для навесок от 5 г подставлена общая таблица Aquarex (ВНИРО) с сайта — уточните у производителя. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"Aquarex Форель рост 43/19","manufacturer":"Aquarex (ГК «Мелком»)","active":false,"order":21,"temps":[2,4,6,8,10,12,14,16,18,20],"rows":[{"wFrom":0,"wTo":0.2,"fraction":0.4,"fcr":null,"rates":[1.41,1.83,2.28,2.74,3.45,4.16,4.57,4.98,4.33,null]},{"wFrom":0.2,"wTo":0.4,"fraction":0.6,"fcr":null,"rates":[1.37,1.79,2.24,2.68,3.34,4.04,4.38,4.67,4.22,null]},{"wFrom":0.4,"wTo":0.8,"fraction":0.7,"fcr":null,"rates":[1.34,1.76,2.2,2.63,3.28,3.93,4.19,4.36,4.11,null]},{"wFrom":0.8,"wTo":0.9,"fraction":0.9,"fcr":null,"rates":[1.28,1.71,2.13,2.55,3.18,3.81,4.07,4.23,3.99,null]},{"wFrom":0.9,"wTo":1.3,"fraction":1.2,"fcr":null,"rates":[1.24,1.66,2.06,2.47,3.09,3.7,3.95,4.11,3.87,null]},{"wFrom":1.3,"wTo":5.0,"fraction":1.6,"fcr":null,"rates":[1.17,1.6,1.99,2.39,2.99,3.59,3.83,3.99,3.75,null]},{"wFrom":5,"wTo":20,"fraction":2.0,"fcr":null,"rates":[0.74,1.05,1.4,1.75,2.1,2.45,2.85,3.25,2.7,2.31]},{"wFrom":20,"wTo":50,"fraction":2.5,"fcr":null,"rates":[0.55,0.83,1.15,1.45,1.8,2.14,2.6,2.95,2.5,2.15]},{"wFrom":50,"wTo":100,"fraction":3.5,"fcr":null,"rates":[0.45,0.72,0.98,1.26,1.6,1.95,2.3,2.78,2.3,1.94]},{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.41,0.66,0.9,1.15,1.45,1.78,2.12,2.48,2.08,1.71]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.37,0.6,0.82,1.06,1.3,1.59,1.9,2.25,1.85,1.53]},{"wFrom":300,"wTo":500,"fraction":4.5,"fcr":null,"rates":[0.33,0.54,0.74,0.96,1.21,1.42,1.75,2.1,1.71,1.38]},{"wFrom":500,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.3,0.49,0.67,0.87,1.1,1.3,1.61,1.95,1.55,1.24]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.27,0.44,0.6,0.78,0.97,1.18,1.48,1.86,1.45,1.15]},{"wFrom":1000,"wTo":2000,"fraction":9.0,"fcr":null,"rates":[0.23,0.38,0.52,0.68,0.85,1.08,1.35,1.72,1.38,1.09]},{"wFrom":2000,"wTo":5000,"fraction":11.0,"fcr":null,"rates":[0.19,0.32,0.44,0.58,0.78,0.95,1.25,1.65,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":43,"fat":19,"astaxanthin":"есть, кол-во не указано","fractions":"не указаны","url":"https://www.aqua-rex.ru/ru/forel/forel-rost-43-19"},"source":"aqua-rex.ru — на странице корма опубликована только стартовая таблица до 5 г (одинаковая у кормов 55/13, 50/17, 43/19 и 44/23; 20 °C — «по поедаемости»; перекрытия 0,4–0,8/0,7–0,9 и 0,9–1,3/1,2–5,0 г сдвинуты). Фракции и диапазон навесок корма не указаны. Для навесок от 5 г подставлена общая таблица Aquarex (ВНИРО) с сайта — уточните у производителя. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам."},{"name":"F3 Стартовый","manufacturer":"АО «Рыбные Корма»","active":false,"order":30,"temps":[6,8,10,12,14,16,18],"rows":[{"wFrom":5,"wTo":10,"fraction":1.5,"fcr":null,"rates":[1.99,2.35,2.81,3.09,3.54,3.99,3.0]},{"wFrom":10,"wTo":40,"fraction":2.0,"fcr":null,"rates":[1.53,1.81,2.16,2.38,2.72,3.07,2.31]}],"prices":[],"specs":{"type":"стартовый","protein":"54 / 52","fat":"16 / 17","astaxanthin":"есть, кол-во не указано","fractions":"1,5; 2,0","url":"https://fish-feed.ru/product/"},"source":"fish-feed.ru/product — одна таблица ориентировочных норм на все корма F3 для форели и лосося (кг на 100 кг рыбы в день); строки взяты по размерам гранул этого корма. Ниже 6 °C и выше 18 °C — «по поедаемости» (берётся норма 6 и 18 °C). Строка «200–400 г» у производителя принята как 200–300 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам.Протеин и жир — для гранул 1,5 / 2,0 мм. Нормы F3 начинаются с 5 г."},{"name":"F3 Среднеэнергетичный медленно тонущий","manufacturer":"АО «Рыбные Корма»","active":false,"order":30,"temps":[6,8,10,12,14,16,18],"rows":[{"wFrom":40,"wTo":100,"fraction":3.0,"fcr":null,"rates":[1.1,1.3,1.6,1.9,2.3,2.8,2.3]},{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.89,1.0,1.3,1.5,1.9,2.3,1.8]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.81,0.9,1.1,1.4,1.7,2.0,1.6]},{"wFrom":300,"wTo":400,"fraction":4.5,"fcr":null,"rates":[0.75,0.9,1.1,1.3,1.6,1.9,1.5]},{"wFrom":400,"wTo":500,"fraction":6.0,"fcr":null,"rates":[0.72,0.8,1.0,1.2,1.5,1.8,1.5]},{"wFrom":500,"wTo":600,"fraction":6.0,"fcr":null,"rates":[0.68,0.8,0.9,1.2,1.4,1.7,1.4]},{"wFrom":600,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.63,0.7,0.9,1.1,1.3,1.6,1.3]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.58,0.7,0.8,1.0,1.2,1.5,1.2]},{"wFrom":1000,"wTo":2000,"fraction":8.0,"fcr":null,"rates":[0.55,0.6,0.8,0.9,1.1,1.4,1.1]},{"wFrom":2000,"wTo":5000,"fraction":10.0,"fcr":null,"rates":[0.51,0.6,0.7,0.9,1.0,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":"47 → 42","fat":"18 → 24","astaxanthin":"есть, кол-во не указано","fractions":"3,0–10,0","url":"https://fish-feed.ru/product/"},"source":"fish-feed.ru/product — одна таблица ориентировочных норм на все корма F3 для форели и лосося (кг на 100 кг рыбы в день); строки взяты по размерам гранул этого корма. Ниже 6 °C и выше 18 °C — «по поедаемости» (берётся норма 6 и 18 °C). Строка «200–400 г» у производителя принята как 200–300 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам.Протеин и жир меняются по фракциям: 3 мм — 47/18, 4,5 — 45/21, 6 — 43/22, 8 и 10 — 42/24."},{"name":"F3 Высокоэнергетичный медленно тонущий","manufacturer":"АО «Рыбные Корма»","active":false,"order":30,"temps":[6,8,10,12,14,16,18],"rows":[{"wFrom":40,"wTo":100,"fraction":3.0,"fcr":null,"rates":[1.1,1.3,1.6,1.9,2.3,2.8,2.3]},{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.89,1.0,1.3,1.5,1.9,2.3,1.8]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.81,0.9,1.1,1.4,1.7,2.0,1.6]},{"wFrom":300,"wTo":400,"fraction":4.5,"fcr":null,"rates":[0.75,0.9,1.1,1.3,1.6,1.9,1.5]},{"wFrom":400,"wTo":500,"fraction":6.0,"fcr":null,"rates":[0.72,0.8,1.0,1.2,1.5,1.8,1.5]},{"wFrom":500,"wTo":600,"fraction":6.0,"fcr":null,"rates":[0.68,0.8,0.9,1.2,1.4,1.7,1.4]},{"wFrom":600,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.63,0.7,0.9,1.1,1.3,1.6,1.3]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.58,0.7,0.8,1.0,1.2,1.5,1.2]},{"wFrom":1000,"wTo":2000,"fraction":8.0,"fcr":null,"rates":[0.55,0.6,0.8,0.9,1.1,1.4,1.1]},{"wFrom":2000,"wTo":5000,"fraction":10.0,"fcr":null,"rates":[0.51,0.6,0.7,0.9,1.0,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":"43 → 40","fat":"24 → 27","astaxanthin":"есть, кол-во не указано","fractions":"3,0–10,0","url":"https://fish-feed.ru/product/"},"source":"fish-feed.ru/product — одна таблица ориентировочных норм на все корма F3 для форели и лосося (кг на 100 кг рыбы в день); строки взяты по размерам гранул этого корма. Ниже 6 °C и выше 18 °C — «по поедаемости» (берётся норма 6 и 18 °C). Строка «200–400 г» у производителя принята как 200–300 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам.Протеин и жир по фракциям: 3 мм — 43/24, 4,5 — 42/25, 6 — 41/26, 8 и 10 — 40/27."},{"name":"F3 Высокоэнергетичный+ медленно тонущий","manufacturer":"АО «Рыбные Корма»","active":false,"order":30,"temps":[6,8,10,12,14,16,18],"rows":[{"wFrom":100,"wTo":200,"fraction":4.5,"fcr":null,"rates":[0.89,1.0,1.3,1.5,1.9,2.3,1.8]},{"wFrom":200,"wTo":300,"fraction":4.5,"fcr":null,"rates":[0.81,0.9,1.1,1.4,1.7,2.0,1.6]},{"wFrom":300,"wTo":400,"fraction":4.5,"fcr":null,"rates":[0.75,0.9,1.1,1.3,1.6,1.9,1.5]},{"wFrom":400,"wTo":500,"fraction":6.0,"fcr":null,"rates":[0.72,0.8,1.0,1.2,1.5,1.8,1.5]},{"wFrom":500,"wTo":600,"fraction":6.0,"fcr":null,"rates":[0.68,0.8,0.9,1.2,1.4,1.7,1.4]},{"wFrom":600,"wTo":800,"fraction":6.0,"fcr":null,"rates":[0.63,0.7,0.9,1.1,1.3,1.6,1.3]},{"wFrom":800,"wTo":1000,"fraction":6.0,"fcr":null,"rates":[0.58,0.7,0.8,1.0,1.2,1.5,1.2]},{"wFrom":1000,"wTo":2000,"fraction":8.0,"fcr":null,"rates":[0.55,0.6,0.8,0.9,1.1,1.4,1.1]},{"wFrom":2000,"wTo":5000,"fraction":10.0,"fcr":null,"rates":[0.51,0.6,0.7,0.9,1.0,1.3,1.0]}],"prices":[],"specs":{"type":"продукционный","protein":"44 → 40","fat":"28 → 32","astaxanthin":"есть, кол-во не указано","fractions":"4,5–10,0","url":"https://fish-feed.ru/product/"},"source":"fish-feed.ru/product — одна таблица ориентировочных норм на все корма F3 для форели и лосося (кг на 100 кг рыбы в день); строки взяты по размерам гранул этого корма. Ниже 6 °C и выше 18 °C — «по поедаемости» (берётся норма 6 и 18 °C). Строка «200–400 г» у производителя принята как 200–300 г. КК производитель не публикует — внесите КК поставщика; пока он не задан, расчёт берёт фактический КК хозяйства по навескам.Протеин и жир по фракциям: 4,5 мм — 44/28, 6 — 41/30, 8 и 10 — 40/32."}];
+// Значения по умолчанию пустые: цену кислорода, расход О2 и разгрузочные дни
+// хозяйство задаёт само в «Корма и нормы» → «Общие настройки расчёта».
+const ECON_DEFAULTS = {
+  o2Price: 0,        // руб за 1 кг О2 — пока не задана, кислород в затраты не входит
+  o2Coef: [],        // кг О2 на 1 кг корма по диапазонам температуры
+  fastingDays: []    // разгрузочные дни месяца (без кормления)
+};
+const EXPENSE_CATEGORIES = ["Ветпрепараты и обработки","Электроэнергия","Заработная плата","Аренда и обслуживание","Транспорт","Прочее"];
+
+function econRound(x){ return Math.sign(x) * Math.round(Math.abs(x)); } // округление 0,5 от нуля
+function isoAddDays(iso, n){
+  const [y,m,d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m-1, d+n)).toISOString().slice(0,10);
+}
+function isoDiffDays(a, b){ return Math.round((Date.parse(b+"T00:00:00Z") - Date.parse(a+"T00:00:00Z"))/86400000); }
+function parseNum(v){
+  if(v === undefined || v === null) return NaN;
+  const s = String(v).trim().replace(/\s/g, "").replace(",", ".");
+  return s === "" ? NaN : Number(s);
+}
+
+/* ---------- корма ---------- */
+function econSortFeeds(arr){
+  return arr.slice().sort((a,b)=> num(a.order) - num(b.order) || String(a.name||"").localeCompare(String(b.name||""), "ru"));
+}
+function econFeedRows(feed){
+  return ((feed && feed.rows) || []).slice().sort((a,b)=> num(a.wFrom) - num(b.wFrom));
+}
+// Строка нормы корма для навески w (г): последняя строка с «от» ≤ w,
+// а если рыба мельче первой строки — первая строка.
+function econFeedRowFor(feed, wG){
+  const rows = econFeedRows(feed);
+  if(!rows.length) return null;
+  let res = rows[0];
+  for(const r of rows){ if(num(r.wFrom) <= wG) res = r; else break; }
+  return res;
+}
+// Какой корм положен по навеске: первый (по порядку) активный корм,
+// у которого есть строка с «от» ≤ w < «до». Если навеска больше всех
+// диапазонов — корм с самым крупным диапазоном.
+function econPickFeed(feeds, wG){
+  if(!feeds.length) return null;
+  for(const f of feeds){
+    const rows = econFeedRows(f);
+    if(!rows.length) continue;
+    if(num(rows[0].wFrom) <= wG && wG < num(rows[rows.length-1].wTo)) return { feed:f, row: econFeedRowFor(f, wG) };
+  }
+  let best = null, bestTo = -Infinity, bestMin = null, minFrom = Infinity;
+  feeds.forEach(f=>{
+    const rows = econFeedRows(f); if(!rows.length) return;
+    const to = num(rows[rows.length-1].wTo), from = num(rows[0].wFrom);
+    if(to > bestTo){ bestTo = to; best = f; }
+    if(from < minFrom){ minFrom = from; bestMin = f; }
+  });
+  const f = wG < minFrom ? bestMin : best;
+  return f ? { feed:f, row: econFeedRowFor(f, wG) } : null;
+}
+// Суточная норма, % от массы — по округлённой до целого температуре;
+// если такой колонки нет — линейная интерполяция между соседними.
+function econRateAt(feed, row, T){
+  // пустые ячейки («кормить по поедаемости») пропускаем: берём ближайшую заполненную температуру
+  const pairs = [];
+  (feed.temps||[]).forEach((t,i)=>{ const r = (row.rates||[])[i]; if(r !== null && r !== undefined && r !== "" && Number.isFinite(Number(r))) pairs.push([Number(t), Number(r)]); });
+  if(!pairs.length) return 0;
+  const temps = pairs.map(x=>x[0]), rates = pairs.map(x=>x[1]);
+  const t = econRound(num(T, temps[0]));
+  const exact = temps.indexOf(t);
+  if(exact !== -1) return rates[exact];
+  if(t <= temps[0]) return rates[0];
+  if(t >= temps[temps.length-1]) return rates[temps.length-1];
+  for(let i=1; i<temps.length; i++){
+    if(t < temps[i]){
+      const a = temps[i-1], b = temps[i];
+      return rates[i-1] + (rates[i] - rates[i-1]) * (t - a)/(b - a);
+    }
+  }
+  return 0;
+}
+// Цена корма на дату: самая свежая запись прайса не позже даты — либо по этой
+// фракции, либо общая на корм («все фракции»). При одной дате точная фракция главнее.
+function econPriceAt(feed, fraction, dateISO){
+  const isAll = p => p.fraction === "" || p.fraction === null || p.fraction === undefined;
+  const list = ((feed && feed.prices) || []).filter(p=> p && p.date && p.date <= dateISO && (isAll(p) || Number(p.fraction) === Number(fraction)));
+  list.sort((a,b)=> a.date.localeCompare(b.date) || (isAll(a) ? 0 : 1) - (isAll(b) ? 0 : 1));
+  return list.length ? list[list.length-1] : null;
+}
+function econO2K(T, coefs){
+  const list = (coefs && coefs.length ? coefs : ECON_DEFAULTS.o2Coef);
+  if(!list.length) return 0;
+  for(const c of list){ if(c.maxT === null || c.maxT === undefined || c.maxT === "" || num(T) <= num(c.maxT)) return num(c.k); }
+  return num(list[list.length-1].k);
+}
+/* ---------- модель роста (план) ----------
+   plan: { startDate, count, weightG, startCost, days, rateFactor, mortPct (отход, % в сутки),
+           fcr (КК, если у строки корма он не задан), fastingDays[], holdDays, otherPerDay,
+           temps[12], feeds[], o2Price, o2Coef[] }
+   Привес за сутки = навеска × суточная норма ÷ КК; отход = остаток × mortPct/100. */
+function simulatePlan(plan){
+  const feeds = econSortFeeds(plan.feeds || []);
+  const temps = plan.temps || [];
+  const fasting = (plan.fastingDays || []).map(Number);
+  const rateK = num(plan.rateFactor, 1), mortDay = num(plan.mortPct, 0)/100, fcrPlan = num(plan.fcr, 0);
+  const hold = num(plan.holdDays, 0), w0 = num(plan.weightG);
+  const days = Math.max(1, Math.min(num(plan.days, 365), 1500));
+  let w = w0, n = num(plan.count);
+  let cumFeed = 0, cumFeedCost = 0, cumO2 = 0, cumOther = 0;
+  const out = [];
+  for(let i=0; i<days; i++){
+    if(!(n > 0.1) || !(w > 0)) break;
+    const date = isoAddDays(plan.startDate, i);
+    const T = num(temps[Number(date.slice(5,7)) - 1], NaN);
+    if(!Number.isFinite(T)) break; // нет температуры месяца — дальше не считаем
+    const pick = econPickFeed(feeds, w);
+    const isFast = fasting.includes(Number(date.slice(8,10)));
+    const rate = (!pick || isFast) ? 0 : econRateAt(pick.feed, pick.row, T) * rateK;
+    const fcr = pick && num(pick.row.fcr) > 0 ? num(pick.row.fcr) : fcrPlan;
+    const biomass = w/1000*n;
+    const feedKg = rate/100*biomass;
+    const gain = fcr > 0 ? w*rate/100/fcr : 0;
+    const price = pick ? econPriceAt(pick.feed, pick.row.fraction, date) : null;
+    const feedCost = feedKg * (price ? num(price.price) : 0);
+    const o2Cost = feedKg * econO2K(T, plan.o2Coef) * num(plan.o2Price);
+    const other = num(plan.otherPerDay);
+    cumFeed += feedKg; cumFeedCost += feedCost; cumO2 += o2Cost; cumOther += other;
+    const totalCost = num(plan.startCost) + cumFeedCost + cumO2 + cumOther;
+    const mort = mortDay * n;
+    out.push({ i, date, T, w, n, biomass, rate, fcr, gain, feedKg, cumFeed,
+      feedId: pick ? pick.feed.id : null, feedName: pick ? pick.feed.name : "", fraction: pick ? pick.row.fraction : "",
+      price: price ? num(price.price) : null, feedCost, o2Cost, other, cumFeedCost, cumO2, cumOther, totalCost,
+      costPerKg: biomass > 0 ? totalCost/biomass : null, mort });
+    n = n - mort;
+    w = (i + 1 < hold) ? w0 : w + gain;
+  }
+  return out;
+}
+// Когда план достигает целевых навесок.
+function planMilestones(rows, targets){
+  return targets.map(t=>{
+    let r = null;
+    for(const x of rows){ if(x.w <= t) r = x; else break; }
+    if(!r || !rows.length || rows[rows.length-1].w < t) return { target:t, reached:false };
+    return { target:t, reached:true, row:r, days: r.i };
+  });
+}
+// @@ECON_ENGINE_END
+
+/* ---------- факт: навески, нормы на фактическое стадо, себестоимость ---------- */
+let econVersion = 0;
+const econMemo = new Map();
+function econCached(key, fn){
+  const k = econVersion + "|" + (currentPlotId||"") + "|" + key;
+  if(econMemo.has(k)) return econMemo.get(k);
+  if(econMemo.size > 2000) econMemo.clear();
+  const v = fn();
+  econMemo.set(k, v);
+  return v;
+}
+function econSettings(){
+  const s = (state.settings && state.settings.economy) || {};
+  return {
+    o2Price: s.o2Price !== undefined ? num(s.o2Price) : ECON_DEFAULTS.o2Price,
+    o2Coef: Array.isArray(s.o2Coef) && s.o2Coef.length ? s.o2Coef : ECON_DEFAULTS.o2Coef,
+    fastingDays: Array.isArray(s.fastingDays) ? s.fastingDays.map(Number) : ECON_DEFAULTS.fastingDays
+  };
+}
+function econAllFeeds(){ return econSortFeeds(Object.entries(state.feeds||{}).map(([id,f])=>({...f, id}))); }
+function econActiveFeeds(){ return econAllFeeds().filter(f=> f.active !== false); }
+function econKindValue(feedId, fraction){ return feedId + "|" + fraction; }
+function econParseKind(v){
+  if(!v) return null;
+  const i = String(v).lastIndexOf("|");
+  if(i < 0) return null;
+  return { feedId: v.slice(0,i), fraction: Number(v.slice(i+1)) };
+}
+function econKindLabel(v){
+  const k = econParseKind(v); if(!k) return "—";
+  const f = state.feeds[k.feedId];
+  return (f ? f.name : "удалённый корм") + " · " + fmtN(k.fraction, 1) + " мм";
+}
+// Все варианты «корм · фракция» для выбора при вводе кормления.
+function econKindOptions(includeInactive){
+  const list = [];
+  (includeInactive ? econAllFeeds() : econActiveFeeds()).forEach(f=>{
+    const seen = new Set();
+    econFeedRows(f).forEach(r=>{
+      const fr = Number(r.fraction);
+      if(seen.has(fr)) return; seen.add(fr);
+      list.push({ value: econKindValue(f.id, fr), label: `${f.name} · ${fmtN(fr,1)} мм` });
+    });
+  });
+  return list;
+}
+
+// Средняя температура по месяцам — только из журнала «Температура» текущего
+// участка. Месяц без замеров берёт значение ближайшего месяца, где замеры есть;
+// если замеров нет совсем — температур нет (план попросит ввести их вручную).
+function econMonthlyTemps(){
+  return econCached("mtemps", ()=>{
+    const sums = Array(12).fill(0), cnt = Array(12).fill(0);
+    Object.values(state.temperature||{}).forEach(d=>{
+      if(!d || !d.date) return;
+      const m = tempDayMean(d);
+      if(m === null || m === undefined || Number.isNaN(m)) return;
+      const k = Number(d.date.slice(5,7)) - 1;
+      sums[k] += m; cnt[k]++;
+    });
+    const have = []; for(let k=0; k<12; k++) if(cnt[k] > 0) have.push(k);
+    const temps = [], fromJournal = [];
+    for(let k=0; k<12; k++){
+      if(cnt[k] > 0){ temps.push(sums[k]/cnt[k]); fromJournal.push(true); continue; }
+      fromJournal.push(false);
+      if(!have.length){ temps.push(null); continue; }
+      let best = have[0], bd = 99;
+      have.forEach(h=>{ const d = Math.min(Math.abs(h-k), 12-Math.abs(h-k)); if(d < bd){ bd = d; best = h; } });
+      temps.push(sums[best]/cnt[best]);
+    }
+    return { temps, fromJournal, any: have.length > 0 };
+  });
+}
+// Температура в бассейне на дату: замер за день → среднее по участку за день → среднемесячная.
+function econTempFor(date, pool){
+  const doc = state.temperature && state.temperature[date];
+  if(doc){
+    const byPool = tempDailyAvg(doc);
+    if(pool && byPool[pool] !== undefined) return byPool[pool];
+    const m = tempDayMean(doc);
+    if(m !== null && m !== undefined && !Number.isNaN(m)) return m;
+  }
+  const t = econMonthlyTemps().temps[Number(date.slice(5,7)) - 1];
+  return (t === null || t === undefined) ? null : t;
+}
+// Фактический кормовой коэффициент хозяйства по всем навескам (корм ÷ прирост
+// биомассы) — используется, пока у корма не задан КК поставщика.
+function econFarmFCR(){
+  return econCached("farmfcr", ()=>{
+    const rows = computeFCRTable("", todayISO()).filter(r=> r.ok && r.gain > 0);
+    const feed = rows.reduce((a,r)=>a+r.feed,0), gain = rows.reduce((a,r)=>a+r.gain,0);
+    return gain > 0 && feed > 0 ? feed/gain : null;
+  });
+}
+// Фактический отход хозяйства, % в сутки: погибшие (журнал + ЧП) ÷ остаток
+// за последние 90 дней с данными по выбранным бассейнам.
+function econFarmMortPct(pools){
+  return econCached("farmmort|"+(pools||POOLS).join(","), ()=>{
+    const P = econPopIndex();
+    const incByDate = incidentValuesByDate();
+    const dates = P.dates.slice(-90);
+    let dead = 0, fishDays = 0;
+    dates.forEach(d=>{
+      const m = combinedMortValues(d, incByDate);
+      (pools||POOLS).forEach(p=>{ const n = num(P.byDate[d] && P.byDate[d][p]); if(n > 0){ fishDays += n; dead += num(m[p]); } });
+    });
+    return fishDays > 0 ? dead/fishDays*100 : null;
+  });
+}
+function econFcrFor(row){ return row && num(row.fcr) > 0 ? num(row.fcr) : econFarmFCR(); }
+
+// Последний известный вес рыбы в бассейне (кг) не позже даты:
+// навеска → вес при зарыблении → вес при пересадке в этот бассейн.
+function econWeightIndex(){
+  return econCached("windex", ()=>{
+    const idx = {};
+    POOLS.forEach(p=> idx[p] = []);
+    Object.values(state.naveski||{}).forEach(r=>{
+      if(!r || !r.values) return;
+      POOLS.forEach(p=>{ const v = r.values[p]; if(v !== undefined && v !== null && v !== "" && num(v) > 0) idx[p].push({ date:r.date, kg:num(v), src:"навеска" }); });
+    });
+    Object.values(state.stocking||{}).forEach(s=>{ if(idx[s.pool] && num(s.weight) > 0) idx[s.pool].push({ date:s.date, kg:num(s.weight), src:"зарыбление" }); });
+    Object.values(state.transfers||{}).forEach(t=>{ if(idx[t.to] && num(t.weight) > 0) idx[t.to].push({ date:t.date, kg:num(t.weight), src:"пересадка" }); });
+    const prio = { "навеска":0, "зарыбление":1, "пересадка":2 };
+    POOLS.forEach(p=> idx[p].sort((a,b)=> a.date.localeCompare(b.date) || prio[b.src]-prio[a.src]));
+    return idx;
+  });
+}
+function econLastWeight(pool, date){
+  const list = econWeightIndex()[pool] || [];
+  let res = null;
+  for(const x of list){ if(x.date <= date) res = x; else break; }
+  return res;
+}
+// Ожидаемая навеска на дату (г): от последнего замера дорастить по нормам
+// активных кормов и температуре (не больше 120 суток вперёд).
+function econProjectedWeight(pool, date){
+  return econCached("pw|"+pool+"|"+date, ()=>{
+    const m = econLastWeight(pool, date);
+    if(!m) return null;
+    const feeds = econActiveFeeds();
+    const S = econSettings();
+    let w = m.kg * 1000;
+    const days = Math.min(Math.max(isoDiffDays(m.date, date), 0), 120);
+    for(let k=0; k<days; k++){
+      const d = isoAddDays(m.date, k);
+      if(S.fastingDays.includes(Number(d.slice(8,10)))) continue;
+      const pick = econPickFeed(feeds, w);
+      if(!pick) break;
+      const T = econTempFor(d, pool);
+      const fcr = econFcrFor(pick.row);
+      if(T === null || !(fcr > 0)) break; // без температуры или КК дорастить нельзя
+      w += w*econRateAt(pick.feed, pick.row, T)/100/fcr;
+    }
+    return { g:w, measuredKg:m.kg, measuredDate:m.date, src:m.src, days };
+  });
+}
+function econPopIndex(){ return econCached("pop", ()=> buildPopulation()); }
+function econPopAt(pool, date){ const P = econPopIndex(); return populationAt(P.byDate, P.dates, date, pool); }
+
+// Корм «по умолчанию» для бассейна на дату — по ожидаемой навеске.
+function econDefaultKind(pool, date){
+  const pw = econProjectedWeight(pool, date);
+  if(!pw) return null;
+  const pick = econPickFeed(econActiveFeeds(), pw.g);
+  return pick ? econKindValue(pick.feed.id, pick.row.fraction) : null;
+}
+// Норма кормления на фактическое стадо: ожидаемая навеска × численность ×
+// суточная норма выбранного корма при температуре дня. Разгрузочный день — 0.
+function econNorm(pool, date, kind){
+  const pw = econProjectedWeight(pool, date);
+  const n = econPopAt(pool, date);
+  if(!pw || !(n > 0)) return null;
+  const k = econParseKind(kind || econDefaultKind(pool, date));
+  const feed = k && state.feeds[k.feedId] ? {...state.feeds[k.feedId], id:k.feedId} : null;
+  const T = econTempFor(date, pool);
+  const S = econSettings();
+  const fasting = S.fastingDays.includes(Number(date.slice(8,10)));
+  let rate = 0;
+  if(T === null && !fasting) return null; // нет температуры — норму не посчитать
+  if(feed && !fasting){ const row = econFeedRowFor(feed, pw.g); rate = row ? econRateAt(feed, row, T) : 0; }
+  const biomass = pw.g/1000*n;
+  return { kg: rate/100*biomass, rate, T, wG: pw.g, n, biomass, fasting, pw, kind: k ? econKindValue(k.feedId, k.fraction) : null };
+}
+
+// Главный расчёт фактической себестоимости. Затраты «прикреплены» к рыбе
+// в бассейне: малёк + корм + кислород + прочие. При пересадке переносится
+// доля затрат пропорционально числу рыб; при продаже/выбытии доля
+// списывается в себестоимость реализованного; если бассейн опустел,
+// оставшиеся затраты списываются как потери.
+function econLedger(){
+  return econCached("ledger", ()=>{
+    const P = econPopIndex();
+    const S = econSettings();
+    const cats = ["fry","feed","o2","other"];
+    const zero = ()=>({fry:0, feed:0, o2:0, other:0});
+    const dateSet = new Set(P.dates);
+    const expenses = Object.values(state.expenses||{}).filter(e=> e && e.date);
+    expenses.forEach(e=> dateSet.add(e.date));
+    const dates = [...dateSet].sort();
+    const stockByDate = {}, trByDate = {}, expByDate = {};
+    Object.values(state.stocking||{}).forEach(s=>{ (stockByDate[s.date] = stockByDate[s.date] || []).push(s); });
+    Object.values(state.transfers||{}).forEach(t=>{ (trByDate[t.date] = trByDate[t.date] || []).push(t); });
+    expenses.forEach(e=>{ (expByDate[e.date] = expByDate[e.date] || []).push(e); });
+    const run = {}; POOLS.forEach(p=> run[p] = zero());
+    const sold = zero(), lost = zero(), unallocated = zero();
+    const snap = {}, daily = {};
+    const issues = { noPrice:{}, noFryPrice:[], autoKind:0, noWeight:{} };
+    dates.forEach(date=>{
+      const day = {}; POOLS.forEach(p=> day[p] = { feedKg:0, fry:0, feed:0, o2:0, other:0, kind:null, price:null, auto:false });
+      (stockByDate[date]||[]).forEach(s=>{
+        if(!run[s.pool]) return;
+        let cost = 0;
+        if(s.cost !== undefined && s.cost !== null && s.cost !== "") cost = num(s.cost);
+        else if(num(s.price) > 0 && num(s.weight) > 0) cost = num(s.price) * num(s.weight) * num(s.count);
+        else issues.noFryPrice.push(s);
+        run[s.pool].fry += cost; day[s.pool].fry += cost;
+      });
+      const fd = state.feed && state.feed[date];
+      if(fd){
+        POOLS.forEach(p=>{
+          const net = Math.max(0, num(fd.used && fd.used[p]) - num(fd.returned && fd.returned[p]));
+          if(!(net > 0)) return;
+          let kind = fd.kinds && fd.kinds[p];
+          if(!kind){ kind = econDefaultKind(p, date); day[p].auto = true; issues.autoKind++; }
+          const k = econParseKind(kind);
+          const feed = k && state.feeds[k.feedId];
+          const pr = feed ? econPriceAt(feed, k.fraction, date) : null;
+          if(!pr){ const key = kind ? econKindLabel(kind) : "корм не определён (нет навески)"; issues.noPrice[key] = (issues.noPrice[key]||0) + net; }
+          const feedCost = net * (pr ? num(pr.price) : 0);
+          const Tday = econTempFor(date, p);
+          const o2 = Tday === null ? 0 : net * econO2K(Tday, S.o2Coef) * S.o2Price;
+          run[p].feed += feedCost; run[p].o2 += o2;
+          Object.assign(day[p], { feedKg:net, feed:feedCost, o2, kind, price: pr ? num(pr.price) : null });
+        });
+      }
+      (expByDate[date]||[]).forEach(e=>{
+        const amt = num(e.amount);
+        if(e.pool && run[e.pool]){ run[e.pool].other += amt; day[e.pool].other += amt; return; }
+        // на участок целиком — делим по биомассе (если навесок нет — по численности)
+        const w = {}; let tot = 0;
+        POOLS.forEach(p=>{
+          const n = econPopAt(p, date);
+          if(!(n > 0)) return;
+          const lw = econLastWeight(p, date);
+          w[p] = n * (lw ? lw.kg : 0); tot += w[p];
+        });
+        if(!(tot > 0)){ tot = 0; POOLS.forEach(p=>{ const n = econPopAt(p, date); if(n > 0){ w[p] = n; tot += n; } }); }
+        if(!(tot > 0)){ unallocated.other += amt; return; }
+        Object.keys(w).forEach(p=>{ const part = amt * w[p]/tot; run[p].other += part; day[p].other += part; });
+      });
+      (trByDate[date]||[]).forEach(t=>{
+        if(!run[t.from]) return;
+        const c = num(t.count);
+        const after = num(P.byDate[date] && P.byDate[date][t.from]);
+        const before = after + c;
+        const share = before > 0 ? Math.min(1, c/before) : 0;
+        cats.forEach(cat=>{
+          const moved = run[t.from][cat] * share;
+          run[t.from][cat] -= moved;
+          if(run[t.to]) run[t.to][cat] += moved; else sold[cat] += moved;
+        });
+      });
+      POOLS.forEach(p=>{
+        const n = num(P.byDate[date] && P.byDate[date][p]);
+        const tot = cats.reduce((s,c)=> s + run[p][c], 0);
+        if(!(n > 0) && tot > 0 && P.byDate[date]){ cats.forEach(c=>{ lost[c] += run[p][c]; run[p][c] = 0; }); }
+      });
+      const sn = {}; POOLS.forEach(p=> sn[p] = {...run[p]});
+      snap[date] = sn;
+      daily[date] = day;
+    });
+    return { dates, snap, daily, sold, lost, unallocated, issues };
+  });
+}
+function econCostAt(pool, date){
+  const L = econLedger();
+  let d = null;
+  for(let i=L.dates.length-1; i>=0; i--){ if(L.dates[i] <= date){ d = L.dates[i]; break; } }
+  const c = d ? L.snap[d][pool] : null;
+  const z = { fry:0, feed:0, o2:0, other:0 };
+  const res = c ? {...c} : z;
+  res.total = res.fry + res.feed + res.o2 + res.other;
+  return res;
+}
+// Состояние бассейна/участка на дату по факту.
+function econFactState(pools, date){
+  let n = 0, biomass = 0, cost = 0, measured = true;
+  const parts = { fry:0, feed:0, o2:0, other:0 };
+  pools.forEach(p=>{
+    const c = econCostAt(p, date);
+    Object.keys(parts).forEach(k=> parts[k] += c[k]);
+    cost += c.total;
+    const np = econPopAt(p, date);
+    if(!(np > 0)) return;
+    n += np;
+    const lw = econLastWeight(p, date);
+    if(lw) biomass += np * lw.kg; else measured = false;
+  });
+  return { n, biomass, wG: n > 0 ? biomass/n*1000 : null, cost, parts, costPerKg: biomass > 0 ? cost/biomass : null, measured };
+}
+// Затраты, понесённые за период (не зависят от пересадок).
+function econIncurred(pools, from, to){
+  const L = econLedger();
+  const res = { feedKg:0, fry:0, feed:0, o2:0, other:0 };
+  L.dates.forEach(d=>{
+    if((from && d < from) || (to && d > to)) return;
+    pools.forEach(p=>{ const x = L.daily[d][p]; if(!x) return; Object.keys(res).forEach(k=> res[k] += num(x[k])); });
+  });
+  res.total = res.fry + res.feed + res.o2 + res.other;
+  return res;
+}
+
+/* ---------- план против факта ---------- */
+function econPlanPools(plan){ return plan.scope === "pool" ? (POOLS.includes(plan.pool) ? [plan.pool] : []) : POOLS.slice(); }
+function econPlanFact(plan){
+  return econCached("pf|"+plan.id+"|"+(plan.updatedAt||0), ()=>{
+    const rows = simulatePlan(plan);
+    const pools = econPlanPools(plan);
+    const L = econLedger();
+    const lastFact = L.dates.length ? L.dates[L.dates.length-1] : null;
+    const facts = [];
+    let cumFeed = 0, cumNorm = 0, cumCost = 0;
+    rows.forEach(r=>{
+      if(!lastFact || r.date > lastFact) return;
+      const day = L.daily[r.date];
+      let feedKg = 0, inc = 0, norm = 0, hasFeedDoc = !!(state.feed && state.feed[r.date]);
+      pools.forEach(p=>{
+        if(day && day[p]){ feedKg += day[p].feedKg; inc += day[p].feed + day[p].o2 + day[p].other; }
+        const nm = econNorm(p, r.date, state.feed && state.feed[r.date] && state.feed[r.date].kinds && state.feed[r.date].kinds[p]);
+        if(nm) norm += nm.kg;
+      });
+      cumFeed += feedKg; cumNorm += norm; cumCost += inc;
+      const st = econFactState(pools, r.date);
+      facts.push({ date:r.date, plan:r, feedKg, norm, cumFeed, cumNorm, incurred:cumCost, hasFeedDoc, ...st });
+    });
+    // взвешивания внутри периода плана
+    const weighings = [];
+    const navDates = Object.keys(state.naveski||{}).sort();
+    navDates.forEach(d=>{
+      const pr = rows.find(r=> r.date === d);
+      if(!pr) return;
+      const st = econFactState(pools, d);
+      const anyMeasured = pools.some(p=>{ const v = state.naveski[d].values && state.naveski[d].values[p]; return v !== undefined && v !== null && v !== ""; });
+      if(!anyMeasured || !(st.n > 0)) return;
+      weighings.push({ date:d, planW:pr.w, factW:st.wG, planN:pr.n, factN:st.n, planB:pr.biomass, factB:st.biomass });
+    });
+    return { rows, facts, weighings, pools, lastFact };
+  });
+}
+function econPct(fact, plan){ return plan ? (fact - plan)/plan*100 : null; }
+function econDevTag(pct, mode){
+  // mode: "abs" — плохо в обе стороны; "lower" — меньше лучше; "higher" — больше лучше
+  if(pct === null || pct === undefined || !Number.isFinite(pct)) return `<span class="tag muted">н/д</span>`;
+  const a = Math.abs(pct);
+  let cls;
+  if((mode === "lower" && pct <= 0) || (mode === "higher" && pct >= 0)) cls = "good";
+  else cls = a < 5 ? "good" : (a < 15 ? "warn" : "bad");
+  return `<span class="tag ${cls}">${pct > 0 ? "+" : ""}${fmtN(pct,1)}%</span>`;
+}
+
+/* ---------- интерфейс: «Корма и нормы» ---------- */
+function econFmtInput(x){ return (x === undefined || x === null || x === "") ? "" : String(x).replace(".", ","); }
+function econNormsToText(feed){
+  const temps = feed.temps || [];
+  const head = ["от, г","до, г","фракция, мм","КК"].concat(temps.map(t=>t)).join("\t");
+  const lines = econFeedRows(feed).map(r=> [r.wFrom, r.wTo, r.fraction, (r.fcr===null||r.fcr===undefined)?"-":r.fcr].concat((r.rates||[]).map(x=> x===null||x===undefined ? "-" : x)).map(econFmtInput).join("\t"));
+  return [head].concat(lines).join("\n");
+}
+// Таблица норм: первая строка — заголовок, где после четырёх колонок
+// (от, до, фракция, КК) идут температуры; дальше строки с цифрами.
+// Разделитель — табуляция (вставка из Excel) или «;». Нормы — в % от массы рыбы в сутки.
+function econParseNorms(text){
+  const lines = String(text||"").split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(lines.length < 2) throw new Error("Нужна строка заголовка с температурами и хотя бы одна строка норм");
+  const split = l => (l.indexOf("\t") !== -1 ? l.split("\t") : l.split(";")).map(c=>c.trim());
+  const head = split(lines[0]);
+  const temps = head.slice(4).map(parseNum);
+  if(!temps.length || temps.some(t=> !Number.isFinite(t))) throw new Error("В заголовке после «от; до; фракция; КК» должны идти температуры числами, например 2; 4; 6 …");
+  for(let i=1; i<temps.length; i++) if(temps[i] <= temps[i-1]) throw new Error("Температуры в заголовке должны идти по возрастанию");
+  const rows = lines.slice(1).map((l, i)=>{
+    const c = split(l).map(parseNum);
+    const [wFrom, wTo, fraction, fcr] = c;
+    // пустая ячейка или «-» — норма не задана (кормить по поедаемости)
+    const rates = temps.map((_,k)=>{ const v = c[4+k]; return Number.isFinite(v) ? v : null; });
+    if([wFrom, wTo, fraction].some(v=> !Number.isFinite(v))) throw new Error(`Строка ${i+2}: «от», «до» и «фракция» должны быть числами`);
+    if(!(wTo > wFrom)) throw new Error(`Строка ${i+2}: «до» должно быть больше «от»`);
+    if(Number.isFinite(fcr) && !(fcr > 0)) throw new Error(`Строка ${i+2}: КК должен быть больше нуля (или оставьте ячейку пустой)`);
+    if(c.length > 4 + temps.length) throw new Error(`Строка ${i+2}: норм больше, чем температур в заголовке`);
+    if(!rates.some(v=> v !== null)) throw new Error(`Строка ${i+2}: нет ни одной нормы`);
+    if(rates.some(v=> v !== null && v < 0)) throw new Error(`Строка ${i+2}: норма не может быть отрицательной`);
+    if(rates.some(v=> v !== null && v > 20)) throw new Error(`Строка ${i+2}: норма больше 20% в сутки — проверьте, что нормы указаны в процентах`);
+    return { wFrom, wTo, fraction, fcr: Number.isFinite(fcr) ? fcr : null, rates };
+  }).sort((a,b)=> a.wFrom - b.wFrom);
+  return { temps, rows };
+}
+function econParseDate(s){
+  s = String(s||"").trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if(m) return s;
+  m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
+  return null;
+}
+function econPricesToText(feed){
+  return ((feed.prices)||[]).slice().sort((a,b)=> a.date.localeCompare(b.date) || num(a.fraction)-num(b.fraction))
+    .map(p=> [fmtDRaw(p.date), (p.fraction === "" || p.fraction === null || p.fraction === undefined) ? "все" : econFmtInput(p.fraction), econFmtInput(p.price)].join("\t")).join("\n");
+}
+function econParsePrices(text){
+  const lines = String(text||"").split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  return lines.map((l, i)=>{
+    const c = (l.indexOf("\t") !== -1 ? l.split("\t") : l.split(";")).map(x=>x.trim());
+    const date = econParseDate(c[0]);
+    if(!date) throw new Error(`Цены, строка ${i+1}: дата должна быть в виде ДД.ММ.ГГГГ`);
+    const frRaw = (c[1]||"").toLowerCase();
+    const fraction = (frRaw === "" || frRaw === "все" || frRaw === "*") ? "" : parseNum(frRaw);
+    if(fraction !== "" && !Number.isFinite(fraction)) throw new Error(`Цены, строка ${i+1}: фракция — число или «все»`);
+    const price = parseNum(c[2]);
+    if(!(price >= 0)) throw new Error(`Цены, строка ${i+1}: цена должна быть числом`);
+    return { date, fraction, price };
+  });
+}
+function econCurrentPrices(feed){
+  const today = todayISO();
+  const fracs = [...new Set(econFeedRows(feed).map(r=> Number(r.fraction)))];
+  return fracs.map(fr=>({ fraction:fr, price: econPriceAt(feed, fr, today) }));
+}
+
+function econSpecsLine(f){
+  const sp = f.specs || {};
+  const parts = [];
+  if(sp.type) parts.push(esc(sp.type));
+  if(sp.protein !== undefined && sp.protein !== "") parts.push("протеин "+esc(sp.protein)+"%");
+  if(sp.fat !== undefined && sp.fat !== "") parts.push("жир "+esc(sp.fat)+"%");
+  if(sp.astaxanthin) parts.push("астаксантин: "+esc(sp.astaxanthin));
+  if(sp.fractions) parts.push("гранулы "+esc(sp.fractions)+" мм");
+  return parts.join(" · ");
+}
+function econFeedRange(f){
+  const rows = econFeedRows(f);
+  if(!rows.length) return "нет норм";
+  const a = num(rows[0].wFrom), b = num(rows[rows.length-1].wTo);
+  return `${a<=0 ? "до" : fmtN(a, a<1?2:0)+"–"}${a<=0?" ":""}${fmtN(b, b<1?2:0)} г`;
+}
+function renderFeedCompare(feeds){
+  if(feeds.length < 2) return "";
+  const sortKey = renderFeeds._sort || "type";
+  const val = (f, k)=>{ const sp = f.specs||{}; if(k==="w") return num((econFeedRows(f)[0]||{}).wFrom); if(k==="protein"||k==="fat") return parseFloat(String(sp[k]||"").replace(",", ".")) || 0; return String(k==="name"?f.name:(sp[k]||"")); };
+  const list = feeds.slice().sort((a,b)=>{ const x = val(a,sortKey), y = val(b,sortKey); return (typeof x === "number" ? x - y : String(x).localeCompare(String(y),"ru")) || val(a,"w") - val(b,"w"); });
+  const th = (k, t)=> `<th style="cursor:pointer;${k==="name"||k==="type"?"text-align:left;":""}" data-feed-sort="${k}">${t}${sortKey===k?" ▾":""}</th>`;
+  return `<div class="panel">
+    <div class="panel-head"><h2>Сравнение кормов</h2><span class="hint">нажмите на заголовок, чтобы отсортировать</span></div>
+    <div class="panel-body table-wrap"><table><thead><tr>${th("name","Корм")}${th("type","Тип")}${th("protein","Протеин, %")}${th("fat","Жир, %")}<th style="text-align:left;">Астаксантин</th><th>Гранулы, мм</th>${th("w","Навески")}<th>Цена сейчас</th><th></th></tr></thead><tbody>
+      ${list.map(f=>{ const sp = f.specs||{}; const cur = econCurrentPrices(f).filter(c=>c.price); return `<tr>
+        <td style="text-align:left;">${esc(f.name)}</td><td style="text-align:left;">${esc(sp.type||"—")}</td>
+        <td class="num">${esc(sp.protein!==undefined&&sp.protein!==""?sp.protein:"—")}</td><td class="num">${esc(sp.fat!==undefined&&sp.fat!==""?sp.fat:"—")}</td>
+        <td style="text-align:left; white-space:normal;">${esc(sp.astaxanthin||"—")}</td><td class="num">${esc(sp.fractions||[...new Set(econFeedRows(f).map(r=>fmtN(r.fraction,1)))].join("; "))}</td>
+        <td class="num">${econFeedRange(f)}</td>
+        <td class="num">${cur.length ? fmtN(Math.min(...cur.map(c=>c.price.price)),0)+(cur.length>1?"–"+fmtN(Math.max(...cur.map(c=>c.price.price)),0):"")+" руб/кг" : '<span class="hint">нет цены</span>'}</td>
+        <td>${f.active===false?'<span class="tag muted">выкл.</span>':'<span class="tag good">в работе</span>'}</td></tr>`; }).join("")}
+    </tbody></table></div></div>`;
+}
+
+function renderFeeds(){
+  const feeds = econAllFeeds();
+  const S = econSettings();
+  const edit = renderFeeds._edit || null;
+  const editing = edit && edit !== "new" ? state.feeds[edit] : null;
+  const tmpl = editing ? {...editing, id:edit} : { name:"", manufacturer:"", order: feeds.length, active:true,
+    temps: [2,4,6,8,10,12,14,16,18,20], rows:[], prices:[] };
+  const err = renderFeeds._err || "";
+  const coef = S.o2Coef;
+  const editor = edit ? `
+  <div class="panel" id="feedEditorPanel" style="border-color:var(--accent);">
+    <div class="panel-head"><h2>${editing ? "Изменить корм «"+esc(editing.name)+"»" : "Новый корм"}</h2>
+      <button class="btn ghost small" data-feed-cancel="1">Закрыть</button></div>
+    <div class="panel-body">
+      ${err ? `<div class="alert bad" style="margin-bottom:12px;">${esc(err)}</div>` : ""}
+      <form id="feedEditForm">
+        <div class="row">
+          <div class="field" style="flex:2;"><label>Название корма</label><input type="text" name="name" value="${esc(tmpl.name)}" required placeholder="напр. Aller Futura"></div>
+          <div class="field"><label>Производитель</label><input type="text" name="manufacturer" value="${esc(tmpl.manufacturer||"")}"></div>
+          <div class="field" style="max-width:130px;"><label>Порядок выбора</label><input type="number" step="1" name="order" value="${esc(num(tmpl.order))}"></div>
+          <div class="field" style="max-width:150px;"><label>Использовать</label><select name="active"><option value="1" ${tmpl.active!==false?"selected":""}>да</option><option value="0" ${tmpl.active===false?"selected":""}>нет (архив)</option></select></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Тип корма</label><input type="text" name="sp_type" list="feedTypes" value="${esc((tmpl.specs||{}).type||"")}" placeholder="стартовый / продукционный"><datalist id="feedTypes"><option value="стартовый"><option value="продукционный"><option value="продукционный (УЗВ)"><option value="ремонтно-маточный"></datalist></div>
+          <div class="field"><label>Протеин, %</label><input type="text" name="sp_protein" value="${esc((tmpl.specs||{}).protein??"")}"></div>
+          <div class="field"><label>Жир, %</label><input type="text" name="sp_fat" value="${esc((tmpl.specs||{}).fat??"")}"></div>
+          <div class="field" style="flex:2;"><label>Астаксантин</label><input type="text" name="sp_astaxanthin" value="${esc((tmpl.specs||{}).astaxanthin||"")}" placeholder="напр. 50 мг/кг, есть / нет"></div>
+          <div class="field"><label>Гранулы, мм</label><input type="text" name="sp_fractions" value="${esc((tmpl.specs||{}).fractions||"")}"></div>
+        </div>
+        <label>Нормы кормления производителя, % от массы рыбы в сутки</label>
+        <div class="hint" style="margin-bottom:6px;">Первая строка — заголовок: <span class="kbd">от, г · до, г · фракция, мм · КК · температуры…</span>. Ниже — по строке на диапазон навесок. Можно скопировать таблицу прямо из Excel (столбцы через табуляцию) или разделять «;». Дробные числа — через запятую или точку. КК — ожидаемый кормовой коэффициент поставщика для этого диапазона; если его нет, поставьте «-» — тогда расчёт возьмёт фактический КК хозяйства по навескам.</div>
+        <textarea name="norms" rows="12" class="mono" style="font-size:12px; white-space:pre; overflow-x:auto;" spellcheck="false">${esc(econNormsToText(tmpl))}</textarea>
+        <label style="margin-top:12px;">Цены, руб/кг — по строке: <span class="kbd">дата · фракция (или «все») · цена</span></label>
+        <div class="hint" style="margin-bottom:6px;">Цена действует с указанной даты до следующей записи. Старые цены не удаляйте — по ним пересчитывается себестоимость за прошлые дни.</div>
+        <textarea name="prices" rows="6" class="mono" style="font-size:12px;" spellcheck="false" placeholder="01.10.2026	все	180">${esc(econPricesToText(tmpl))}</textarea>
+        <div class="row" style="margin-top:12px; gap:8px;">
+          <button class="btn" type="submit">Сохранить корм</button>
+        </div>
+      </form>
+    </div>
+  </div>` : "";
+
+  const cards = feeds.map(f=>{
+    const rows = econFeedRows(f);
+    const cur = econCurrentPrices(f);
+    const fracs = [...new Set(rows.map(r=>Number(r.fraction)))];
+    const range = econFeedRange(f);
+    return `<div class="panel">
+      <div class="panel-head">
+        <h2>${esc(f.name)} ${f.active===false?'<span class="tag muted">не используется</span>':'<span class="tag good">в работе</span>'}</h2>
+        <div class="row" style="gap:8px;">
+          <span class="hint">${esc(f.manufacturer||"")} · ${range} · порядок ${fmtN(num(f.order))}</span>
+          <button class="btn ghost small" data-feed-edit="${esc(f.id)}">Изменить нормы и цены</button>
+          <button class="btn ghost small" data-feed-toggle="${esc(f.id)}">${f.active===false?"Вернуть в работу":"Убрать из работы"}</button>
+          <button class="btn danger" data-feed-del="${esc(f.id)}">удалить</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        ${f.specs ? `<div style="margin-bottom:12px;">${econSpecsLine(f)}${f.specs.url?` · <a href="${esc(f.specs.url)}" target="_blank" rel="noopener noreferrer">страница корма</a>`:""}</div>` : ""}
+        <div class="two-col">
+          <div>
+            <label>Действующие цены на ${fmtD(todayISO())}</label>
+            <div class="table-wrap"><table><thead><tr><th>Фракция, мм</th><th>Цена, руб/кг</th><th>С даты</th></tr></thead><tbody>
+              ${cur.map(c=>`<tr><td>${fmtN(c.fraction,1)}</td><td class="num">${c.price?fmtN(c.price.price,2):'<span class="tag bad">нет цены</span>'}</td><td>${c.price?fmtD(c.price.date):"—"}</td></tr>`).join("")}
+            </tbody></table></div>
+          </div>
+          <div>
+            <label>Новая цена</label>
+            <form class="feedPriceForm" data-feed-id="${esc(f.id)}">
+              <div class="row">
+                <div class="field"><label>С даты</label><input type="date" name="date" value="${todayISO()}" required></div>
+                <div class="field"><label>Фракция</label><select name="fraction"><option value="">все фракции</option>${fracs.map(fr=>`<option value="${fr}">${fmtN(fr,1)} мм</option>`).join("")}</select></div>
+                <div class="field"><label>Цена, руб/кг</label><input type="number" step="0.01" min="0" name="price" required></div>
+              </div>
+              <button class="btn small" type="submit">Добавить цену</button>
+            </form>
+          </div>
+        </div>
+        <details style="margin-top:12px;"><summary class="hint" style="cursor:pointer;">Таблица норм (${rows.length} строк, ${(f.temps||[]).length} температур)</summary>
+          <div class="table-wrap" style="margin-top:8px;"><table><thead><tr><th>От, г</th><th>До, г</th><th>Фракция</th><th>КК</th>${(f.temps||[]).map(t=>`<th>${fmtN(t)}°</th>`).join("")}</tr></thead><tbody>
+          ${rows.map(r=>`<tr><td>${fmtN(r.wFrom, r.wFrom<1?2:0)}</td><td class="num">${fmtN(r.wTo, r.wTo<1?2:0)}</td><td class="num">${fmtN(r.fraction,1)}</td><td class="num">${num(r.fcr)>0?fmtN(r.fcr,2):'<span class="hint">факт</span>'}</td>${(r.rates||[]).map(x=>`<td class="num">${x===null||x===undefined||x===""?'<span class="hint">по поед.</span>':fmtN(x,2)}</td>`).join("")}</tr>`).join("")}
+          </tbody></table></div>
+          ${f.source?`<div class="hint" style="margin-top:6px;">Источник: ${esc(f.source)}</div>`:""}
+        </details>
+      </div>
+    </div>`;
+  }).join("");
+
+  return `
+  ${topbar("Корма и нормы", "Нормы кормления производителей, кормовые коэффициенты и цены — общие для всего хозяйства", `<button class="btn small" data-feed-new="1">+ Новый корм</button>`)}
+  ${!feeds.length ? `<div class="panel"><div class="panel-body">
+      <div class="alert warn" style="margin-bottom:12px;">Справочник кормов пуст. Без него не считаются нормы кормления, план роста и себестоимость корма.</div>
+      <button class="btn" data-feed-seed="1">Добавить корма производителей</button>
+      <span class="hint" style="margin-left:10px;">${ECON_CATALOG.length} форелевых кормов Aquarex и F3 с сайтов производителей — состав, фракции и нормы, без цен. Добавляются выключенными. Свой корм — кнопкой «+ Новый корм».</span>
+    </div></div>` : ""}
+  ${editor}
+  ${renderFeedCompare(feeds)}
+  ${(()=>{ const have = new Set(feeds.map(f=>String(f.name).trim().toLowerCase())); const miss = ECON_CATALOG.filter(f=> !have.has(f.name.toLowerCase())); return feeds.length && miss.length ? `<div class="panel"><div class="panel-body row" style="align-items:center; gap:10px;"><button class="btn ghost small" data-feed-catalog="1">Добавить корма производителей</button><span class="hint">${miss.length} форелевых кормов Aquarex и F3 с сайтов производителей (состав, фракции, нормы; без цен). Добавляются выключенными — включите те, что покупаете.</span></div></div>` : ""; })()}
+  <div class="panel">
+    <div class="panel-head"><h2>Как приложение выбирает корм</h2></div>
+    <div class="panel-body hint" style="line-height:1.6;">
+      По ожидаемой навеске рыбы берётся первый корм «в работе» (по полю «порядок»), у которого есть подходящий диапазон навесок. Чтобы перейти на другой корм, добавьте его и поставьте ему меньший порядок или уберите старый из работы. При вводе кормления корм по каждому бассейну можно поменять вручную — себестоимость считается по выбранному корму и его цене на дату кормления.
+    </div>
+  </div>
+  ${cards}
+  <div class="panel">
+    <div class="panel-head"><h2>Общие настройки расчёта</h2></div>
+    <div class="panel-body">
+      <form id="econSettingsForm">
+        <div class="row">
+          <div class="field"><label>Цена кислорода, руб/кг</label><input type="number" step="0.01" min="0" name="o2Price" value="${S.o2Price?esc(S.o2Price):""}" placeholder="не задана — кислород не считается"></div>
+          <div class="field"><label>Разгрузочные дни месяца (без кормления)</label><input type="text" name="fasting" value="${esc(S.fastingDays.join(", "))}" placeholder="пусто — кормим каждый день"></div>
+        </div>
+        <label>Расход кислорода, кг О2 на 1 кг корма</label>
+        <div class="row">
+          <div class="field"><label>до t, °C</label><input type="number" step="0.1" name="t1" value="${esc(coef[0]?coef[0].maxT:"")}"></div>
+          <div class="field"><label>кг О2/кг</label><input type="number" step="0.01" name="k1" value="${esc(coef[0]?coef[0].k:"")}"></div>
+          <div class="field"><label>до t, °C</label><input type="number" step="0.1" name="t2" value="${esc(coef[1]?coef[1].maxT:"")}"></div>
+          <div class="field"><label>кг О2/кг</label><input type="number" step="0.01" name="k2" value="${esc(coef[1]?coef[1].k:"")}"></div>
+          <div class="field"><label>выше — кг О2/кг</label><input type="number" step="0.01" name="k3" value="${esc(coef[2]?coef[2].k:"")}"></div>
+        </div>
+        <button class="btn" type="submit">Сохранить настройки</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+/* ---------- интерфейс: «Расчёт роста» (план и отклонения) ---------- */
+function econPlanList(){ return Object.entries(state.plans||{}).map(([id,p])=>({...p, id})).sort((a,b)=> (b.startDate||"").localeCompare(a.startDate||"") || num(b.createdAt)-num(a.createdAt)); }
+function econScopeLabel(plan){ return plan.scope === "pool" ? poolLabel(plan.pool) : "весь участок"; }
+// Стартовые значения плана по факту на дату.
+function econPlanAuto(scope, pool, date){
+  const pools = scope === "pool" ? [pool] : POOLS;
+  let n = 0, wsum = 0, cost = 0;
+  pools.forEach(p=>{
+    cost += econCostAt(p, date).total;
+    const np = econPopAt(p, date);
+    if(!(np > 0)) return;
+    const pw = econProjectedWeight(p, date);
+    n += np; if(pw) wsum += np * pw.g;
+  });
+  return { count: Math.round(n), weightG: n > 0 && wsum > 0 ? wsum/n : null, startCost: cost };
+}
+const PLAN_TARGETS = [1,5,10,50,100,200,300,400,500,700,1000,1250,1500,2000,2500,3000];
+
+function renderPlan(){
+  const plans = econPlanList();
+  const sel = renderPlan._sel && state.plans[renderPlan._sel] ? renderPlan._sel : (plans[0] ? plans[0].id : null);
+  renderPlan._sel = sel;
+  const S = econSettings();
+  const MT = econMonthlyTemps();
+  const noFeeds = !econActiveFeeds().length;
+  const today = todayISO();
+  const form = `
+  <div class="panel">
+    <div class="panel-head"><h2>Новый расчёт (план)</h2><span class="hint">пустые поля «численность», «навеска», «стоимость стада» заполняются по факту на дату старта</span></div>
+    <div class="panel-body">
+      ${noFeeds ? `<div class="alert warn" style="margin-bottom:12px;">Сначала заполните раздел «Корма и нормы» — без норм план не считается.</div>` : ""}
+      <form id="planForm">
+        <div class="row">
+          <div class="field" style="flex:2;"><label>Название</label><input type="text" name="name" placeholder="напр. Б3, осень 2026"></div>
+          <div class="field"><label>Что считаем</label><select name="scope" id="planScope"><option value="plot">весь участок</option>${POOLS.map(p=>`<option value="pool:${esc(p)}">бассейн ${poolLabel(p)}</option>`).join("")}</select></div>
+          <div class="field"><label>Дата старта</label><input type="date" name="startDate" id="planStart" value="${today}" required></div>
+          <div class="field"><label>Срок, суток</label><input type="number" name="days" min="1" max="1500" step="1" value="365"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Численность, шт.</label><input type="number" name="count" id="planCount" step="1" min="0"></div>
+          <div class="field"><label>Навеска, г</label><input type="number" name="weightG" id="planWeight" step="0.001" min="0"></div>
+          <div class="field"><label>Стоимость стада на старте, руб</label><input type="number" name="startCost" id="planCost" step="0.01" min="0"></div>
+          <div class="field"><label>Прочие затраты, руб/сут</label><input type="number" name="otherPerDay" step="0.01" min="0" value="0"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Норма кормления, % от таблицы</label><input type="number" name="ratePct" step="1" min="1" value="100"></div>
+          <div class="field"><label>Отход, % в сутки</label><input type="number" name="mortPct" id="planMort" step="0.001" min="0"></div>
+          <div class="field"><label>КК, если у корма не задан</label><input type="number" name="fcr" id="planFcr" step="0.01" min="0"></div>
+          <div class="field"><label>Дней без роста в начале</label><input type="number" name="holdDays" step="1" min="0" value="0"></div>
+          <div class="field"><label>Разгрузочные дни месяца</label><input type="text" name="fasting" value="${esc(S.fastingDays.join(", "))}"></div>
+        </div>
+        <div class="field"><label>Средняя температура воды по месяцам, °C (янв … дек, через «;»)</label>
+          <input type="text" name="temps" value="${esc(MT.temps.map(t=> t===null ? "" : String(Math.round(t*10)/10).replace(".",",")).join("; "))}" placeholder="заполните, если журнал температуры пуст">
+          <div class="hint">${MT.any ? `Посчитано по журналу «Температура» этого участка.${MT.fromJournal.every(Boolean) ? "" : " Месяцы без замеров (" + MT.fromJournal.map((x,k)=> x ? null : ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][k]).filter(Boolean).join(", ") + ") взяты по ближайшему месяцу с замерами — поправьте при необходимости."}` : "В журнале «Температура» нет замеров — впишите 12 значений вручную."}</div></div>
+        <div class="hint" style="margin-bottom:10px;">Пустые «отход» и «КК» берутся из фактических данных хозяйства: отход — средний за последние 90 дней по журналам «Отход» и «ЧП», КК — по навескам (раздел «Навески»).</div>
+        <button class="btn" type="submit" ${noFeeds?"disabled":""}>Рассчитать и сохранить план</button>
+      </form>
+    </div>
+  </div>`;
+
+  const list = plans.length ? `
+  <div class="panel">
+    <div class="panel-head"><h2>Планы участка</h2><span class="hint">${plans.length}</span></div>
+    <div class="panel-body table-wrap"><table><thead><tr><th>Название</th><th>Что</th><th>Старт</th><th>Шт.</th><th>Навеска, г</th><th>Срок</th><th></th></tr></thead><tbody>
+      ${plans.map(p=>`<tr style="${p.id===sel?'background:var(--accent-soft);':''}"><td>${esc(p.name||"план")}</td><td>${econScopeLabel(p)}</td><td>${fmtD(p.startDate)}</td><td class="num">${fmtN(p.count)}</td><td class="num">${fmtN(p.weightG,2)}</td><td class="num">${fmtN(p.days)} сут</td>
+        <td><button class="btn ghost small" data-plan-open="${esc(p.id)}">открыть</button> <button class="btn ghost small" data-plan-refresh="${esc(p.id)}" title="Взять текущие нормы, цены и температуры">обновить нормы и цены</button> <button class="btn danger" data-plan-del="${esc(p.id)}">удалить</button></td></tr>`).join("")}
+    </tbody></table></div>
+  </div>` : "";
+
+  return `${topbar("Расчёт роста", "План выращивания по нормам кормов и отклонения фактических показателей от него", sel ? exportButton("plan","Выгрузить план в Excel") : "")}
+  ${sel ? renderPlanView(state.plans[sel] && {...state.plans[sel], id:sel}) : ""}
+  ${list}
+  ${form}`;
+}
+
+function renderPlanView(plan){
+  if(!plan) return "";
+  const pf = econPlanFact(plan);
+  const rows = pf.rows;
+  if(!rows.length) return `<div class="panel"><div class="panel-body"><div class="alert warn">План «${esc(plan.name)}» пустой — проверьте численность и навеску.</div></div></div>`;
+  const last = pf.facts.length ? pf.facts[pf.facts.length-1] : null;
+  const end = rows[rows.length-1];
+  const ms = planMilestones(rows, PLAN_TARGETS);
+  const noPrice = rows.filter(r=> r.feedKg > 0 && r.price === null).length;
+  let cards = "";
+  if(last){
+    const p = last.plan;
+    const planInc = p.cumFeedCost + p.cumO2 + p.cumOther;
+    cards = `
+    <div class="grid cards">
+      <div class="card"><div class="label">Навеска на ${fmtD(last.date)}</div><div class="value">${last.wG!==null?fmtN(last.wG,1):"—"}<small> г факт</small></div><div class="delta">план ${fmtN(p.w,1)} г · ${econDevTag(econPct(last.wG, p.w), "higher")}</div></div>
+      <div class="card"><div class="label">Численность</div><div class="value">${fmtN(last.n)}<small> шт.</small></div><div class="delta">план ${fmtN(p.n)} · ${econDevTag(econPct(last.n, p.n), "higher")}</div></div>
+      <div class="card"><div class="label">Корм с начала плана</div><div class="value">${fmtN(last.cumFeed,0)}<small> кг</small></div><div class="delta">план ${fmtN(p.cumFeed,0)} · ${econDevTag(econPct(last.cumFeed, p.cumFeed), "abs")}</div></div>
+      <div class="card"><div class="label">Затраты с начала плана</div><div class="value">${fmtN(last.incurred,0)}<small> руб</small></div><div class="delta">план ${fmtN(planInc,0)} · ${econDevTag(econPct(last.incurred, planInc), "lower")}</div></div>
+      <div class="card"><div class="label">Себестоимость 1 кг</div><div class="value">${last.costPerKg!==null?fmtN(last.costPerKg,1):"—"}<small> руб</small></div><div class="delta">план ${p.costPerKg!==null?fmtN(p.costPerKg,1):"—"} · ${econDevTag(econPct(last.costPerKg, p.costPerKg), "lower")}</div></div>
+    </div>`;
+  }
+  const recent = pf.facts.slice(-21).reverse();
+  const feedTable = pf.facts.length ? `
+  <div class="panel">
+    <div class="panel-head"><h2>Кормление по дням: план, норма на фактическое стадо, факт</h2><span class="hint">последние ${recent.length} дн.</span></div>
+    <div class="panel-body table-wrap">
+      <div class="hint" style="margin-bottom:8px;">«Норма» — сколько положено скормить фактической рыбе: ожидаемая навеска (от последнего взвешивания по нормам) × остаток × норма выбранного корма при температуре дня. Отклонение от нормы показывает, сколько перекормили/недокормили, отклонение от плана — насколько день отличается от расчётного.</div>
+      <table><thead><tr><th>Дата</th><th>План, кг</th><th>Норма, кг</th><th>Факт, кг</th><th>Факт к норме</th><th>Факт к плану</th><th>Навеска план, г</th><th>Остаток план / факт</th></tr></thead><tbody>
+      ${recent.map(f=>`<tr><td>${fmtD(f.date)}</td><td class="num">${fmtN(f.plan.feedKg,1)}</td><td class="num">${fmtN(f.norm,1)}</td><td class="num">${f.hasFeedDoc?fmtN(f.feedKg,1):'<span class="hint">не внесено</span>'}</td>
+        <td>${!f.hasFeedDoc ? "" : (f.norm === 0 && f.feedKg > 0 ? '<span class="tag warn">разгрузочный день</span>' : econDevTag(econPct(f.feedKg, f.norm), "abs"))}</td><td>${!f.hasFeedDoc ? "" : (f.plan.feedKg === 0 && f.feedKg > 0 ? '<span class="tag warn">по плану без корма</span>' : econDevTag(econPct(f.feedKg, f.plan.feedKg), "abs"))}</td>
+        <td class="num">${fmtN(f.plan.w,1)}</td><td class="num">${fmtN(f.plan.n)} / ${fmtN(f.n)}</td></tr>`).join("")}
+      </tbody></table>
+    </div>
+  </div>` : `<div class="panel"><div class="panel-body hint">Фактических данных за период плана пока нет — отклонения появятся после первых записей кормления, отхода и навесок.</div></div>`;
+
+  const weighTable = pf.weighings.length ? `
+  <div class="panel">
+    <div class="panel-head"><h2>Рост: взвешивания против плана</h2></div>
+    <div class="panel-body table-wrap"><table><thead><tr><th>Дата</th><th>Навеска план, г</th><th>Навеска факт, г</th><th>Откл.</th><th>Остаток план</th><th>Остаток факт</th><th>Биомасса план, кг</th><th>Биомасса факт, кг</th><th>Откл.</th></tr></thead><tbody>
+      ${pf.weighings.slice().reverse().map(w=>`<tr><td>${fmtD(w.date)}</td><td class="num">${fmtN(w.planW,1)}</td><td class="num">${fmtN(w.factW,1)}</td><td>${econDevTag(econPct(w.factW,w.planW),"higher")}</td><td class="num">${fmtN(w.planN)}</td><td class="num">${fmtN(w.factN)}</td><td class="num">${fmtN(w.planB,0)}</td><td class="num">${fmtN(w.factB,0)}</td><td>${econDevTag(econPct(w.factB,w.planB),"higher")}</td></tr>`).join("")}
+    </tbody></table></div>
+  </div>` : "";
+
+  return `
+  <div class="panel" style="border-color:var(--accent);">
+    <div class="panel-head"><h2>${esc(plan.name||"План")} · ${econScopeLabel(plan)}</h2>
+      <span class="hint">старт ${fmtD(plan.startDate)} · ${fmtN(plan.count)} шт. по ${fmtN(plan.weightG,2)} г · стоимость стада ${fmtN(plan.startCost,0)} руб · норма ${fmtN(num(plan.rateFactor,1)*100)}% · отход ${fmtN(num(plan.mortPct),3)}%/сут · КК ${num(plan.fcr)>0?fmtN(plan.fcr,2):"из норм корма"} · нормы и цены от ${fmtD(new Date(num(plan.updatedAt||plan.createdAt)).toISOString().slice(0,10))}</span></div>
+    <div class="panel-body">
+      ${noPrice ? `<div class="alert warn" style="margin-bottom:12px;">В ${noPrice} дн. плана у корма нет цены — затраты на корм в эти дни равны нулю. Добавьте цены в «Корма и нормы» и нажмите «обновить нормы и цены».</div>` : ""}
+      ${cards || `<div class="hint">Отклонения появятся, когда по ${econScopeLabel(plan)} начнут вноситься данные после ${fmtD(plan.startDate)}.</div>`}
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px;">
+        <div><label>Навеска, г: план и взвешивания</label><div class="chart-box"><canvas id="planChartW"></canvas></div></div>
+        <div><label>Корм нарастающим итогом, кг</label><div class="chart-box"><canvas id="planChartF"></canvas></div></div>
+        <div><label>Себестоимость 1 кг, руб</label><div class="chart-box"><canvas id="planChartC"></canvas></div></div>
+      </div>
+      <div class="hint" id="planChartsNote"></div>
+    </div>
+  </div>
+  ${feedTable}
+  ${weighTable}
+  <div class="panel">
+    <div class="panel-head"><h2>Прогноз по навескам</h2><span class="hint">к концу плана (${fmtD(end.date)}): ${fmtN(end.w,0)} г, ${fmtN(end.n)} шт., ${fmtN(end.biomass,0)} кг, ${fmtN(end.costPerKg,1)} руб/кг</span></div>
+    <div class="panel-body table-wrap"><table><thead><tr><th>Навеска, г</th><th>Дата</th><th>Суток</th><th>Остаток, шт.</th><th>Биомасса, кг</th><th>Корм с начала, кг</th><th>Стоимость стада, руб</th><th>Себестоимость, руб/кг</th></tr></thead><tbody>
+      ${ms.filter(m=> m.target > num(plan.weightG)).map(m=> m.reached ? `<tr><td>${fmtN(m.target)}</td><td>${fmtD(m.row.date)}</td><td class="num">${fmtN(m.days)}</td><td class="num">${fmtN(m.row.n)}</td><td class="num">${fmtN(m.row.biomass,0)}</td><td class="num">${fmtN(m.row.cumFeed,0)}</td><td class="num">${fmtN(m.row.totalCost,0)}</td><td class="num">${fmtN(m.row.costPerKg,1)}</td></tr>` : `<tr><td>${fmtN(m.target)}</td><td colspan="7" class="hint">не достигается за срок плана</td></tr>`).join("")}
+    </tbody></table></div>
+  </div>`;
+}
+
+function drawPlanCharts(retries){
+  retries = retries || 0;
+  const plan = renderPlan._sel && state.plans[renderPlan._sel] ? {...state.plans[renderPlan._sel], id:renderPlan._sel} : null;
+  if(!plan || !document.getElementById("planChartW")) return;
+  if(typeof Chart === "undefined"){ if(retries < 20) setTimeout(()=>drawPlanCharts(retries+1), 250); return; }
+  destroyCharts();
+  const pf = econPlanFact(plan);
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue("--accent").trim() || "#0E7C86";
+  const warn = styles.getPropertyValue("--warn").trim() || "#B4711F";
+  const inkDim = styles.getPropertyValue("--ink-dim").trim() || "#53696C";
+  Chart.defaults.color = inkDim;
+  Chart.defaults.borderColor = styles.getPropertyValue("--border").trim() || "#D6E5E2";
+  const factBy = {}; pf.facts.forEach(f=> factBy[f.date] = f);
+  const labels = pf.rows.map(r=> fmtDRaw(r.date));
+  const weighBy = {}; pf.weighings.forEach(w=> weighBy[w.date] = w.factW);
+  const opts = (fmt)=>({ responsive:true, maintainAspectRatio:false, interaction:{mode:"index", intersect:false},
+    plugins:{ legend:{position:"bottom", labels:{boxWidth:9, boxHeight:9, font:{size:11}}} },
+    scales:{ x:{ ticks:{ maxTicksLimit:8 } }, y:{ ticks:{ callback:v=>fmtN(v, fmt) } } } });
+  const planDs = (data, label)=>({ label, data, borderColor:accent, backgroundColor:accent, borderWidth:2, pointRadius:0, tension:.2 });
+  const factDs = (data, label, points)=>({ label, data, borderColor:warn, backgroundColor:warn, borderWidth:2, pointRadius: points?4:0, showLine: !points, spanGaps:true, tension:.2 });
+  charts.planW = new Chart(document.getElementById("planChartW"), { type:"line",
+    data:{ labels, datasets:[ planDs(pf.rows.map(r=>r.w), "план"), factDs(pf.rows.map(r=> weighBy[r.date] !== undefined ? weighBy[r.date] : null), "взвешивание", true) ] }, options: opts(0) });
+  charts.planF = new Chart(document.getElementById("planChartF"), { type:"line",
+    data:{ labels, datasets:[ planDs(pf.rows.map(r=>r.cumFeed), "план"), factDs(pf.rows.map(r=> factBy[r.date] ? factBy[r.date].cumFeed : null), "факт") ] }, options: opts(0) });
+  charts.planC = new Chart(document.getElementById("planChartC"), { type:"line",
+    data:{ labels, datasets:[ planDs(pf.rows.map(r=>r.costPerKg), "план"), factDs(pf.rows.map(r=> factBy[r.date] && factBy[r.date].costPerKg ? factBy[r.date].costPerKg : null), "факт") ] }, options: opts(0) });
+  const note = document.getElementById("planChartsNote");
+  if(note) note.textContent = "Фактическая себестоимость 1 кг считается по последней внесённой навеске, поэтому меняется скачком в дни взвешиваний.";
+}
+
+/* ---------- интерфейс: «Себестоимость» (факт) ---------- */
+function renderCost(){
+  const L = econLedger();
+  const lastDate = L.dates.length ? L.dates[L.dates.length-1] : todayISO();
+  const at = renderCost._at || lastDate;
+  const from = renderCost._from || (at.slice(0,8) + "01");
+  const to = renderCost._to || at;
+  const rows = POOLS.map(p=>{
+    const c = econCostAt(p, at);
+    const n = econPopAt(p, at);
+    const lw = econLastWeight(p, at);
+    const biomass = n > 0 && lw ? n*lw.kg : 0;
+    return { p, c, n, lw, biomass, perKg: biomass > 0 ? c.total/biomass : null };
+  });
+  const tot = rows.reduce((s,r)=>({ fry:s.fry+r.c.fry, feed:s.feed+r.c.feed, o2:s.o2+r.c.o2, other:s.other+r.c.other, total:s.total+r.c.total, n:s.n+r.n, biomass:s.biomass+r.biomass }), {fry:0,feed:0,o2:0,other:0,total:0,n:0,biomass:0});
+  const inc = econIncurred(POOLS, from, to);
+  const incByPool = POOLS.map(p=>({ p, ...econIncurred([p], from, to) }));
+  const plans = econPlanList();
+  const planDev = plans.map(pl=>{
+    const pf = econPlanFact(pl);
+    let f = null;
+    for(const x of pf.facts){ if(x.date <= at) f = x; }
+    return { pl, f };
+  }).filter(x=> x.f);
+  const issues = L.issues;
+  const noPriceKeys = Object.keys(issues.noPrice);
+  const alerts = [];
+  if(!econAllFeeds().length) alerts.push(`<div class="alert warn">Справочник «Корма и нормы» пуст — корм в себестоимости считается по нулевой цене.</div>`);
+  noPriceKeys.forEach(k=> alerts.push(`<div class="alert warn">Нет цены для «${esc(k)}» на дату кормления — ${fmtN(issues.noPrice[k],1)} кг корма учтены по нулевой цене. Добавьте цену в «Корма и нормы» с более ранней датой.</div>`));
+  if(issues.noFryPrice.length) alerts.push(`<div class="alert warn">У ${issues.noFryPrice.length} записей зарыбления не указана цена малька — их стоимость не учтена. Укажите цену в разделе «Зарыбление».</div>`);
+  if(issues.autoKind) alerts.push(`<div class="alert good">В ${fmtN(issues.autoKind)} записях кормления (бассейн × день) корм не выбран вручную — взят корм по навеске из справочника.</div>`);
+  const expenses = Object.entries(state.expenses||{}).map(([id,e])=>({...e,id})).sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+  return `
+  ${topbar("Себестоимость", "Фактические затраты на стадо по журналам: малёк, корм, кислород, прочие затраты", exportButton("cost","Выгрузить в Excel"))}
+  <div class="panel"><div class="panel-body">
+    <form id="costAtForm" class="row" style="align-items:flex-end;">
+      <div class="field" style="max-width:200px;"><label>Себестоимость на дату</label><input type="date" name="at" value="${esc(at)}"></div>
+      <button class="btn" type="submit">Показать</button>
+    </form>
+  </div></div>
+  ${alerts.length ? `<div class="alert-list" style="margin-bottom:16px;">${alerts.join("")}</div>` : ""}
+  <div class="grid cards">
+    <div class="card"><div class="label">Стоимость стада</div><div class="value">${fmtN(tot.total,0)}<small> руб</small></div><div class="delta">на ${fmtD(at)}</div></div>
+    <div class="card"><div class="label">Биомасса</div><div class="value">${fmtN(tot.biomass,0)}<small> кг</small></div><div class="delta">${fmtN(tot.n)} шт. × последние навески</div></div>
+    <div class="card"><div class="label">Себестоимость 1 кг</div><div class="value">${tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}<small> руб</small></div><div class="delta">в среднем по участку</div></div>
+    <div class="card"><div class="label">Затраты за период</div><div class="value">${fmtN(inc.total,0)}<small> руб</small></div><div class="delta">${fmtD(from)} – ${fmtD(to)}</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Себестоимость по бассейнам на ${fmtD(at)}</h2><span class="hint">затраты переходят вместе с рыбой при пересадках</span></div>
+    <div class="panel-body table-wrap"><table><thead><tr><th>Бассейн</th><th>Остаток, шт.</th><th>Навеска, кг</th><th>Биомасса, кг</th><th>Малёк</th><th>Корм</th><th>Кислород</th><th>Прочие</th><th>Итого, руб</th><th>Руб/кг</th></tr></thead><tbody>
+      ${rows.filter(r=> r.n > 0 || Math.abs(r.c.total) > 0.5).map(r=>`<tr><td>${poolLabel(r.p)}</td><td class="num">${fmtN(r.n)}</td><td class="num">${r.lw?fmtN(r.lw.kg,3)+` <span class="hint">${fmtD(r.lw.date)}</span>`:"—"}</td><td class="num">${fmtN(r.biomass,0)}</td>
+        <td class="num">${fmtN(r.c.fry,0)}</td><td class="num">${fmtN(r.c.feed,0)}</td><td class="num">${fmtN(r.c.o2,0)}</td><td class="num">${fmtN(r.c.other,0)}</td><td class="num"><b>${fmtN(r.c.total,0)}</b></td><td class="num"><b>${r.perKg!==null?fmtN(r.perKg,1):"—"}</b></td></tr>`).join("")}
+      <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(tot.n)}</td><td></td><td class="num">${fmtN(tot.biomass,0)}</td><td class="num">${fmtN(tot.fry,0)}</td><td class="num">${fmtN(tot.feed,0)}</td><td class="num">${fmtN(tot.o2,0)}</td><td class="num">${fmtN(tot.other,0)}</td><td class="num">${fmtN(tot.total,0)}</td><td class="num">${tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}</td></tr>
+    </tbody></table>
+    <div class="hint" style="margin-top:8px;">Списано в себестоимость проданной/выбывшей рыбы: ${fmtN(L.sold.fry+L.sold.feed+L.sold.o2+L.sold.other,0)} руб · списано по опустевшим бассейнам: ${fmtN(L.lost.fry+L.lost.feed+L.lost.o2+L.lost.other,0)} руб${L.unallocated.other?` · прочие затраты без рыбы на участке: ${fmtN(L.unallocated.other,0)} руб`:""}.</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Факт против плана на ${fmtD(at)}</h2></div>
+    <div class="panel-body table-wrap">${planDev.length ? `<table><thead><tr><th>План</th><th>Что</th><th>Себест. план, руб/кг</th><th>Себест. факт, руб/кг</th><th>Откл.</th><th>Затраты план, руб</th><th>Затраты факт, руб</th><th>Откл.</th><th>Корм план, кг</th><th>Корм факт, кг</th><th>Откл.</th></tr></thead><tbody>
+      ${planDev.map(({pl,f})=>{ const p = f.plan; const pInc = p.cumFeedCost+p.cumO2+p.cumOther; return `<tr><td>${esc(pl.name||"план")}</td><td>${econScopeLabel(pl)}</td><td class="num">${fmtN(p.costPerKg,1)}</td><td class="num">${f.costPerKg!==null?fmtN(f.costPerKg,1):"—"}</td><td>${econDevTag(econPct(f.costPerKg,p.costPerKg),"lower")}</td><td class="num">${fmtN(pInc,0)}</td><td class="num">${fmtN(f.incurred,0)}</td><td>${econDevTag(econPct(f.incurred,pInc),"lower")}</td><td class="num">${fmtN(p.cumFeed,0)}</td><td class="num">${fmtN(f.cumFeed,0)}</td><td>${econDevTag(econPct(f.cumFeed,p.cumFeed),"abs")}</td></tr>`; }).join("")}
+    </tbody></table>` : `<div class="hint">Нет планов, действующих на эту дату. Создайте план в разделе «Расчёт роста».</div>`}</div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Затраты за период</h2></div>
+    <div class="panel-body">
+      <form id="costPeriodForm" class="row" style="align-items:flex-end;">
+        <div class="field"><label>С даты</label><input type="date" name="from" value="${esc(from)}"></div>
+        <div class="field"><label>По дату</label><input type="date" name="to" value="${esc(to)}"></div>
+        <button class="btn" type="submit">Рассчитать</button>
+      </form>
+      <div class="table-wrap" style="margin-top:12px;"><table><thead><tr><th>Бассейн</th><th>Корм, кг</th><th>Малёк</th><th>Корм, руб</th><th>Кислород</th><th>Прочие</th><th>Итого, руб</th></tr></thead><tbody>
+        ${incByPool.filter(r=> r.total > 0.5 || r.feedKg > 0).map(r=>`<tr><td>${poolLabel(r.p)}</td><td class="num">${fmtN(r.feedKg,1)}</td><td class="num">${fmtN(r.fry,0)}</td><td class="num">${fmtN(r.feed,0)}</td><td class="num">${fmtN(r.o2,0)}</td><td class="num">${fmtN(r.other,0)}</td><td class="num">${fmtN(r.total,0)}</td></tr>`).join("")}
+        <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(inc.feedKg,1)}</td><td class="num">${fmtN(inc.fry,0)}</td><td class="num">${fmtN(inc.feed,0)}</td><td class="num">${fmtN(inc.o2,0)}</td><td class="num">${fmtN(inc.other,0)}</td><td class="num">${fmtN(inc.total,0)}</td></tr>
+      </tbody></table></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Прочие затраты</h2><span class="hint">ветпрепараты, электричество, зарплата и т. п.</span></div>
+    <div class="panel-body">
+      <form id="expenseForm">
+        <div class="row">
+          <div class="field"><label>Дата</label><input type="date" name="date" value="${todayISO()}" required></div>
+          <div class="field"><label>Статья</label><input type="text" name="category" list="expenseCats" required placeholder="выберите или впишите"><datalist id="expenseCats">${EXPENSE_CATEGORIES.map(c=>`<option value="${esc(c)}">`).join("")}</datalist></div>
+          <div class="field"><label>На что относим</label><select name="pool"><option value="">весь участок (по биомассе)</option>${POOLS.map(p=>`<option value="${esc(p)}">бассейн ${poolLabel(p)}</option>`).join("")}</select></div>
+          <div class="field"><label>Сумма, руб</label><input type="number" step="0.01" min="0" name="amount" required></div>
+        </div>
+        <div class="field"><label>Комментарий</label><input type="text" name="comment"></div>
+        <button class="btn" type="submit">Добавить затраты</button>
+      </form>
+      <div class="table-wrap" style="margin-top:14px;"><table><thead><tr><th>Дата</th><th>Статья</th><th>На что</th><th>Сумма, руб</th><th>Комментарий</th><th></th></tr></thead><tbody>
+        ${expenses.length ? expenses.map(e=>`<tr><td>${fmtD(e.date)}</td><td style="text-align:left;">${esc(e.category)}</td><td>${e.pool?poolLabel(e.pool):"весь участок"}</td><td class="num">${fmtN(e.amount,2)}</td><td style="text-align:left; white-space:normal;">${esc(e.comment||"")}</td><td><button class="btn danger" data-del="expenses:${esc(e.id)}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="6">Пока нет записей</td></tr>`}
+      </tbody></table></div>
+    </div>
+  </div>`;
+}
+
+/* ---------- блок норм в «Кормлении» ---------- */
+function renderFeedNormBlock(date, existing){
+  const opts = econKindOptions(true);
+  if(!opts.length) return `<div class="alert warn" style="margin-bottom:12px;">Чтобы видеть норму и отклонения, заполните раздел «Корма и нормы».</div>`;
+  // бассейны без рыбы и без внесённого корма не показываем
+  const shown = POOLS.filter(p=> econPopAt(p, date) > 0 || num(existing && existing.used && existing.used[p]) > 0);
+  if(!shown.length) return `<div class="hint" style="margin-bottom:12px;">На ${fmtD(date)} в учёте нет рыбы — норма не считается.</div>`;
+  const rows = shown.map(p=>{
+    const saved = existing && existing.kinds && existing.kinds[p];
+    const def = econDefaultKind(p, date);
+    const kind = saved || def;
+    const nm = econNorm(p, date, kind);
+    const known = new Set(opts.map(o=>o.value));
+    const extra = kind && !known.has(kind) ? [{ value:kind, label: econKindLabel(kind) }] : [];
+    return `<tr data-norm-row="${esc(p)}" data-norm-kg="${nm ? nm.kg : ""}">
+      <td>${poolLabel(p)}</td>
+      <td style="text-align:left;"><select name="k_${esc(p)}" data-kind-pool="${esc(p)}" style="min-width:210px;">
+        <option value="">${def ? "по навеске: "+esc(econKindLabel(def)) : "— не выбран —"}</option>
+        ${extra.concat(opts).map(o=>`<option value="${esc(o.value)}" ${saved===o.value?"selected":""}>${esc(o.label)}</option>`).join("")}
+      </select></td>
+      <td class="num">${nm ? fmtN(nm.wG, nm.wG<10?2:0)+` <span class="hint" title="последний замер ${fmtDRaw(nm.pw.measuredDate)}: ${fmtN(nm.pw.measuredKg*1000, 1)} г (${nm.pw.src})">${nm.pw.days?"расч.":"замер"}</span>` : "—"}</td>
+      <td class="num">${nm ? fmtN(nm.n) : "—"}</td>
+      <td class="num">${nm ? fmtN(nm.T,1)+"°" : "—"}</td>
+      <td class="num" data-norm-cell="${esc(p)}">${nm ? (nm.fasting ? '0 <span class="hint">разгр.</span>' : fmtN(nm.kg,1)) : "—"}</td>
+      <td class="num" data-fact-cell="${esc(p)}">—</td>
+      <td data-dev-cell="${esc(p)}"></td>
+    </tr>`;
+  }).join("");
+  return `<label style="margin-top:4px;">Корм и норма по бассейнам на ${fmtD(date)}</label>
+    <div class="table-wrap" style="margin-bottom:12px;"><table><thead><tr><th>Бассейн</th><th style="text-align:left;">Корм · фракция</th><th>Навеска, г</th><th>Остаток, шт.</th><th>t воды</th><th>Норма, кг</th><th>Чистый факт, кг</th><th>Откл. от нормы</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr style="font-weight:600;"><td>Итого</td><td></td><td></td><td></td><td></td><td class="num" id="normTotal">—</td><td class="num" id="factTotal">—</td><td id="devTotal"></td></tr></tfoot></table></div>`;
+}
+function updateFeedNormLive(){
+  const form = document.getElementById("feedForm");
+  if(!form) return;
+  const date = form.querySelector("[name=date]").value;
+  let nT = 0, fT = 0, any = false;
+  POOLS.forEach(p=>{
+    const row = form.querySelector(`[data-norm-row="${CSS.escape(p)}"]`);
+    if(!row) return;
+    const sel = row.querySelector("select");
+    const nm = econNorm(p, date, sel && sel.value ? sel.value : null);
+    const used = num((form.querySelector(`[name="u_${CSS.escape(p)}"]`)||{}).value);
+    const ret = num((form.querySelector(`[name="r_${CSS.escape(p)}"]`)||{}).value);
+    const fact = Math.max(0, used - ret);
+    const nCell = row.querySelector("[data-norm-cell]"), fCell = row.querySelector("[data-fact-cell]"), dCell = row.querySelector("[data-dev-cell]");
+    if(nCell) nCell.innerHTML = nm ? (nm.fasting ? '0 <span class="hint">разгр.</span>' : fmtN(nm.kg,1)) : "—";
+    if(fCell) fCell.textContent = fmtN(fact,1);
+    if(dCell) dCell.innerHTML = nm && nm.kg > 0 ? econDevTag(econPct(fact, nm.kg), "abs") + ` <span class="hint">${fact-nm.kg>=0?"+":""}${fmtN(fact-nm.kg,1)} кг</span>` : (fact > 0 && nm && nm.fasting ? `<span class="tag warn">кормили в разгрузочный день</span>` : "");
+    if(nm){ nT += nm.kg; any = true; }
+    fT += fact;
+  });
+  const nt = document.getElementById("normTotal"), ft = document.getElementById("factTotal"), dt = document.getElementById("devTotal");
+  if(nt) nt.textContent = any ? fmtN(nT,1) : "—";
+  if(ft) ft.textContent = fmtN(fT,1);
+  if(dt) dt.innerHTML = any && nT > 0 ? econDevTag(econPct(fT, nT), "abs") : "";
+}
+// Норма и факт за день по всему участку — для истории кормления и дашборда.
+function econDayNormFact(date){
+  const doc = state.feed && state.feed[date];
+  let norm = 0, fact = 0, any = false;
+  POOLS.forEach(p=>{
+    const nm = econNorm(p, date, doc && doc.kinds && doc.kinds[p]);
+    if(nm){ norm += nm.kg; any = true; }
+    if(doc) fact += Math.max(0, num(doc.used && doc.used[p]) - num(doc.returned && doc.returned[p]));
+  });
+  return { norm: any ? norm : null, fact };
+}
+
+/* ---------- обработчики ---------- */
+async function econSeedFeeds(){
+  const now = Date.now();
+  const have = new Set(Object.values(state.feeds||{}).map(f=>String(f.name||"").trim().toLowerCase()));
+  for(const f of ECON_CATALOG){
+    if(have.has(f.name.toLowerCase())) continue;
+    await Store.addDoc("feeds", { ...JSON.parse(JSON.stringify(f)), updatedAt: now });
+  }
+}
+function econSnapshotFeeds(){ return JSON.parse(JSON.stringify(econActiveFeeds())); }
+function econParseDays(s){ return String(s||"").split(/[,;\s]+/).map(x=>parseInt(x,10)).filter(x=> x>=1 && x<=31); }
+
+function wireEcon(main){
+  // --- корма и нормы
+  main.querySelectorAll("[data-feed-new]").forEach(b=> b.addEventListener("click", ()=>{ renderFeeds._edit = "new"; renderFeeds._err = ""; renderActive(); }));
+  main.querySelectorAll("[data-feed-edit]").forEach(b=> b.addEventListener("click", ()=>{ renderFeeds._edit = b.dataset.feedEdit; renderFeeds._err = ""; renderActive(); const el = document.getElementById("feedEditorPanel"); if(el) el.scrollIntoView({behavior:"smooth"}); }));
+  main.querySelectorAll("[data-feed-cancel]").forEach(b=> b.addEventListener("click", ()=>{ renderFeeds._edit = null; renderFeeds._err = ""; renderActive(); }));
+  main.querySelectorAll("[data-feed-seed]").forEach(b=> b.addEventListener("click", async ()=>{
+    b.disabled = true;
+    try{ await econSeedFeeds(); toast("Корма производителей добавлены выключенными — включите нужные и укажите цены"); }
+    catch(err){ console.error(err); toast("Не удалось сохранить корма — проверьте правила доступа базы"); b.disabled = false; }
+  }));
+  main.querySelectorAll("[data-feed-sort]").forEach(th=> th.addEventListener("click", ()=>{ renderFeeds._sort = th.dataset.feedSort; renderActive(); }));
+  main.querySelectorAll("[data-feed-catalog]").forEach(b=> b.addEventListener("click", async ()=>{
+    b.disabled = true;
+    try{ await econSeedFeeds(); toast("Корма производителей добавлены выключенными — включите нужные и укажите цены"); }
+    catch(err){ console.error(err); toast("Не удалось сохранить корма — проверьте правила доступа базы"); b.disabled = false; }
+  }));
+  main.querySelectorAll("[data-feed-toggle]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.feedToggle, f = state.feeds[id]; if(!f) return;
+    await Store.setDoc("feeds", id, {...f, active: f.active === false, updatedAt: Date.now()});
+    await archiveSnapshot("feeds", id, f, "edit");
+    toast(f.active === false ? "Корм возвращён в работу" : "Корм убран из работы");
+  }));
+  main.querySelectorAll("[data-feed-del]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.feedDel, f = state.feeds[id]; if(!f) return;
+    if(!confirm(`Удалить корм «${f.name}»? Записи кормления с этим кормом потеряют цену. Обычно лучше «Убрать из работы».`)) return;
+    await Store.deleteDoc("feeds", id);
+    await archiveSnapshot("feeds", id, f, "delete");
+    toast("Корм удалён");
+  }));
+  const feedEditForm = document.getElementById("feedEditForm");
+  if(feedEditForm) feedEditForm.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const f = new FormData(feedEditForm);
+    try{
+      const name = String(f.get("name")||"").trim();
+      if(!name) throw new Error("Укажите название корма");
+      const { temps, rows } = econParseNorms(f.get("norms"));
+      const prices = econParsePrices(f.get("prices"));
+      const id = renderFeeds._edit !== "new" ? renderFeeds._edit : uid();
+      const old = state.feeds[id];
+      await Store.setDoc("feeds", id, { name, manufacturer: String(f.get("manufacturer")||"").trim(), order: num(f.get("order")), active: f.get("active") !== "0", temps, rows, prices, source: (old && old.source) || "",
+        specs: { ...((old && old.specs) || {}), type: String(f.get("sp_type")||"").trim(), protein: String(f.get("sp_protein")||"").trim(), fat: String(f.get("sp_fat")||"").trim(), astaxanthin: String(f.get("sp_astaxanthin")||"").trim(), fractions: String(f.get("sp_fractions")||"").trim() },
+        updatedAt: Date.now() });
+      if(old) await archiveSnapshot("feeds", id, old, "edit");
+      renderFeeds._edit = null; renderFeeds._err = "";
+      toast(`Корм «${name}» сохранён`);
+    }catch(err){
+      renderFeeds._err = err.message || String(err);
+      renderActive();
+    }
+  });
+  main.querySelectorAll(".feedPriceForm").forEach(form=> form.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const id = form.dataset.feedId, feed = state.feeds[id]; if(!feed) return;
+    const f = new FormData(form);
+    const fr = f.get("fraction");
+    const entry = { date: f.get("date"), fraction: fr === "" ? "" : Number(fr), price: Number(f.get("price")) };
+    const prices = (feed.prices||[]).filter(p=> !(p.date === entry.date && String(p.fraction) === String(entry.fraction)));
+    prices.push(entry);
+    await Store.setDoc("feeds", id, {...feed, prices, updatedAt: Date.now()});
+    await archiveSnapshot("feeds", id, feed, "edit");
+    toast(`Цена ${fmtN(entry.price,2)} руб/кг с ${fmtDRaw(entry.date)} добавлена`);
+  }));
+  const econSettingsForm = document.getElementById("econSettingsForm");
+  if(econSettingsForm) econSettingsForm.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const f = new FormData(econSettingsForm);
+    const doc = { ...(state.settings.economy||{}),
+      o2Price: num(f.get("o2Price")),
+      fastingDays: econParseDays(f.get("fasting")),
+      o2Coef: (()=>{
+        // пары «до t — кг О2 на кг корма»; пустые поля пропускаются
+        const list = [];
+        [["t1","k1"],["t2","k2"]].forEach(([t,k])=>{ const tv = parseNum(f.get(t)), kv = parseNum(f.get(k)); if(Number.isFinite(tv) && Number.isFinite(kv)) list.push({maxT:tv, k:kv}); });
+        const k3 = parseNum(f.get("k3")); if(Number.isFinite(k3)) list.push({maxT:null, k:k3});
+        return list;
+      })(),
+      updatedAt: Date.now() };
+    await Store.setDoc("settings", "economy", doc);
+    toast("Настройки расчёта сохранены");
+  });
+
+  // --- расчёт роста
+  const planForm = document.getElementById("planForm");
+  if(planForm){
+    const scopeEl = document.getElementById("planScope"), startEl = document.getElementById("planStart");
+    const fillAuto = ()=>{
+      const sv = scopeEl.value;
+      const scope = sv === "plot" ? "plot" : "pool", pool = sv === "plot" ? null : sv.slice(5);
+      const a = econPlanAuto(scope, pool, startEl.value || todayISO());
+      document.getElementById("planCount").placeholder = a.count ? "авто: "+fmtN(a.count) : "нет рыбы на дату";
+      document.getElementById("planWeight").placeholder = a.weightG ? "авто: "+fmtN(a.weightG, a.weightG<10?3:1) : "нет навески";
+      document.getElementById("planCost").placeholder = "авто: "+fmtN(a.startCost,0);
+      const mp = econFarmMortPct(scope === "pool" ? [pool] : POOLS), fc = econFarmFCR();
+      document.getElementById("planMort").placeholder = mp !== null ? "факт: "+fmtN(mp,3) : "нет данных — впишите";
+      document.getElementById("planFcr").placeholder = fc !== null ? "факт: "+fmtN(fc,2) : "нет данных — впишите";
+    };
+    scopeEl.addEventListener("change", fillAuto); startEl.addEventListener("change", fillAuto); fillAuto();
+    planForm.addEventListener("submit", async e=>{
+      e.preventDefault();
+      const f = new FormData(planForm);
+      const sv = f.get("scope");
+      const scope = sv === "plot" ? "plot" : "pool", pool = sv === "plot" ? "" : sv.slice(5);
+      const startDate = f.get("startDate");
+      const a = econPlanAuto(scope, pool, startDate);
+      const pick = (k, auto)=>{ const v = f.get(k); return v === "" || v === null ? auto : Number(v); };
+      const count = pick("count", a.count), weightG = pick("weightG", a.weightG), startCost = pick("startCost", a.startCost);
+      if(!(count > 0)){ toast("Укажите численность — на эту дату рыбы в учёте нет"); return; }
+      if(!(weightG > 0)){ toast("Укажите навеску — замеров на эту дату нет"); return; }
+      const mortPct = pick("mortPct", econFarmMortPct(scope === "pool" ? [pool] : POOLS));
+      const fcr = pick("fcr", econFarmFCR());
+      if(mortPct === null || !(mortPct >= 0)){ toast("Укажите отход, % в сутки — фактических данных по отходу нет"); return; }
+      const temps = String(f.get("temps")||"").split(/[;\t]/).map(x=> parseNum(x));
+      if(temps.length !== 12 || temps.some(t=> !Number.isFinite(t))){ toast("Нужно 12 значений температуры по месяцам через «;»"); return; }
+      const needFcr = econActiveFeeds().some(fd=> econFeedRows(fd).some(r=> !(num(r.fcr) > 0)));
+      if(needFcr && !(fcr > 0)){ toast("Укажите КК — у части кормов он не задан, а по навескам его пока не посчитать"); return; }
+      const S = econSettings();
+      const now = Date.now();
+      const name = String(f.get("name")||"").trim() || `${scope==="pool"?poolLabelRaw(pool):"Участок"} с ${fmtDRaw(startDate)}`;
+      const plan = { name, scope, pool, startDate, count, weightG, startCost: num(startCost),
+        days: Math.min(Math.max(num(f.get("days"),365),1),1500), rateFactor: num(f.get("ratePct"),100)/100, mortPct: num(mortPct), fcr: fcr > 0 ? fcr : null,
+        holdDays: num(f.get("holdDays")), fastingDays: econParseDays(f.get("fasting")), otherPerDay: num(f.get("otherPerDay")),
+        temps, feeds: econSnapshotFeeds(), o2Price: S.o2Price, o2Coef: S.o2Coef, createdAt: now, updatedAt: now };
+      const id = await Store.addDoc(pcol("plans"), plan);
+      renderPlan._sel = id;
+      toast("План рассчитан и сохранён");
+    });
+  }
+  main.querySelectorAll("[data-plan-open]").forEach(b=> b.addEventListener("click", ()=>{ renderPlan._sel = b.dataset.planOpen; renderActive(); window.scrollTo({top:0, behavior:"smooth"}); }));
+  main.querySelectorAll("[data-plan-refresh]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.planRefresh, p = state.plans[id]; if(!p) return;
+    if(!confirm("Пересчитать план по текущим нормам, ценам, температурам и настройкам? Старый вариант сохранится в архиве изменений.")) return;
+    const S = econSettings();
+    const MT = econMonthlyTemps();
+    await Store.setDoc(pcol("plans"), id, {...p, feeds: econSnapshotFeeds(), temps: MT.any ? MT.temps : p.temps, o2Price: S.o2Price, o2Coef: S.o2Coef, updatedAt: Date.now()});
+    await archiveSnapshot("plans", id, p, "edit");
+    toast("План пересчитан");
+  }));
+  main.querySelectorAll("[data-plan-del]").forEach(b=> b.addEventListener("click", async ()=>{
+    const id = b.dataset.planDel, p = state.plans[id]; if(!p) return;
+    if(!confirm(`Удалить план «${p.name}»?`)) return;
+    await Store.deleteDoc(pcol("plans"), id);
+    await archiveSnapshot("plans", id, p, "delete");
+    toast("План удалён");
+  }));
+  if(activeSection === "plan") drawPlanCharts();
+
+  // --- себестоимость
+  const costAtForm = document.getElementById("costAtForm");
+  if(costAtForm) costAtForm.addEventListener("submit", e=>{ e.preventDefault(); renderCost._at = new FormData(costAtForm).get("at") || ""; renderActive(); });
+  const costPeriodForm = document.getElementById("costPeriodForm");
+  if(costPeriodForm) costPeriodForm.addEventListener("submit", e=>{
+    e.preventDefault();
+    const f = new FormData(costPeriodForm);
+    const from = f.get("from")||"", to = f.get("to")||"";
+    if(from && to && from > to){ toast("«С даты» позже «По дату» — проверьте диапазон"); return; }
+    renderCost._from = from; renderCost._to = to; renderActive();
+  });
+  const expenseForm = document.getElementById("expenseForm");
+  if(expenseForm) expenseForm.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const f = new FormData(expenseForm);
+    await Store.addDoc(pcol("expenses"), { date: f.get("date"), category: String(f.get("category")||"").trim(), pool: f.get("pool")||"", amount: Number(f.get("amount")), comment: f.get("comment")||"" });
+    expenseForm.reset();
+    toast("Затраты добавлены");
+  });
+
+  // --- кормление: живой пересчёт отклонений от нормы
+  const feedForm = document.getElementById("feedForm");
+  if(feedForm && feedForm.querySelector("[data-norm-row]")){
+    feedForm.querySelectorAll("input[name^='u_'], input[name^='r_'], select[data-kind-pool]").forEach(el=>{
+      el.addEventListener("input", updateFeedNormLive);
+      el.addEventListener("change", updateFeedNormLive);
+    });
+    updateFeedNormLive();
+  }
+}
+
+/* ---------- выгрузка в Excel ---------- */
+function buildWorkbook_plan(){
+  const id = renderPlan._sel;
+  const plan = id && state.plans[id] ? {...state.plans[id], id} : null;
+  const wb = XLSX.utils.book_new();
+  if(!plan){ XLSX.utils.book_append_sheet(wb, aoaSheet([["Нет плана"]]), "План"); return { wb, filename:"План.xlsx" }; }
+  const pf = econPlanFact(plan);
+  const factBy = {}; pf.facts.forEach(f=> factBy[f.date] = f);
+  const r2 = x => (x === null || x === undefined || !Number.isFinite(x)) ? "" : Number(x.toFixed(3));
+  const aoa = [["Дата","Сутки","t, °C","Корм","Фракция","Норма, %","КК","Навеска план, г","Остаток план, шт.","Биомасса план, кг","Корм план, кг","Корм план нарастающим, кг","Корм, руб","Кислород, руб","Прочие, руб","Стоимость стада план, руб","Себестоимость план, руб/кг",
+    "Норма на факт. стадо, кг","Корм факт, кг","Корм факт нарастающим, кг","Остаток факт, шт.","Навеска факт, г","Биомасса факт, кг","Затраты факт с начала, руб","Стоимость стада факт, руб","Себестоимость факт, руб/кг"]];
+  pf.rows.forEach(r=>{
+    const f = factBy[r.date];
+    aoa.push([fmtDRaw(r.date), r.i, r2(r.T), r.feedName, r.fraction, r2(r.rate), r2(r.fcr), r2(r.w), Math.round(r.n), r2(r.biomass), r2(r.feedKg), r2(r.cumFeed), r2(r.feedCost), r2(r.o2Cost), r2(r.other), r2(r.totalCost), r2(r.costPerKg),
+      f?r2(f.norm):"", f?r2(f.feedKg):"", f?r2(f.cumFeed):"", f?Math.round(f.n):"", f?r2(f.wG):"", f?r2(f.biomass):"", f?r2(f.incurred):"", f?r2(f.cost):"", f?r2(f.costPerKg):""]);
+  });
+  XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "План и факт");
+  return { wb, filename:`План — ${String(plan.name||"").replace(/[\\/:*?"<>|]/g,"_")}.xlsx` };
+}
+function buildWorkbook_cost(){
+  const L = econLedger();
+  const at = renderCost._at || (L.dates.length ? L.dates[L.dates.length-1] : todayISO());
+  const r2 = x => Number(num(x).toFixed(2));
+  const aoa = [["Бассейн","Остаток, шт.","Навеска, кг","Биомасса, кг","Малёк, руб","Корм, руб","Кислород, руб","Прочие, руб","Итого, руб","Руб/кг"]];
+  POOLS.forEach(p=>{
+    const c = econCostAt(p, at), n = econPopAt(p, at), lw = econLastWeight(p, at);
+    const b = n > 0 && lw ? n*lw.kg : 0;
+    aoa.push([poolLabelRaw(p), Math.round(n), lw?lw.kg:"", r2(b), r2(c.fry), r2(c.feed), r2(c.o2), r2(c.other), r2(c.total), b>0?r2(c.total/b):""]);
+  });
+  const daily = [["Дата","Бассейн","Корм","Цена, руб/кг","Корм, кг","Корм, руб","Кислород, руб","Прочие, руб","Малёк, руб"]];
+  L.dates.forEach(d=> POOLS.forEach(p=>{
+    const x = L.daily[d][p];
+    if(!x || !(x.feedKg || x.other || x.fry)) return;
+    daily.push([fmtDRaw(d), poolLabelRaw(p), x.kind?econKindLabel(x.kind)+(x.auto?" (по навеске)":""):"", x.price===null?"":x.price, r2(x.feedKg), r2(x.feed), r2(x.o2), r2(x.other), r2(x.fry)]);
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Себестоимость "+fmtDRaw(at).replace(/\./g,"-"));
+  XLSX.utils.book_append_sheet(wb, aoaSheet(daily), "Затраты по дням");
+  return { wb, filename:"Себестоимость.xlsx" };
 }
 
 /* ---------------------------------------------------------------------
@@ -2580,8 +3935,8 @@ function aoaSheet(aoa){ return XLSX.utils.aoa_to_sheet(aoa); }
 
 function buildWorkbook_stocking(){
   const rows = Object.values(state.stocking).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата","Бассейн","Навеска, кг","Количество, шт.","Биомасса, кг","Комментарий"]];
-  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.pool), r.weight||"", num(r.count), r.weight?Number((r.weight*num(r.count)).toFixed(2)):"", r.comment||""]));
+  const aoa = [["Дата","Бассейн","Навеска, кг","Количество, шт.","Биомасса, кг","Цена малька, руб/кг","Стоимость партии, руб","Комментарий"]];
+  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.pool), r.weight||"", num(r.count), r.weight?Number((r.weight*num(r.count)).toFixed(2)):"", r.price||"", r.cost||"", r.comment||""]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Зарыбление");
   return { wb, filename:"Зарыбление.xlsx" };
@@ -2772,7 +4127,8 @@ function buildWorkbook_all(){
 const WORKBOOK_BUILDERS = {
   stocking: buildWorkbook_stocking, transfers: buildWorkbook_transfers, mortality: buildWorkbook_mortality, incidents: buildWorkbook_incidents, feed: buildWorkbook_feed, naveski: buildWorkbook_naveski,
   o2: buildWorkbook_o2, temp: buildWorkbook_temp, treat: buildWorkbook_treat, population: buildWorkbook_population,
-  summary: buildWorkbook_summary, catalog: buildWorkbook_catalog, archive: buildWorkbook_archive, all: buildWorkbook_all
+  summary: buildWorkbook_summary, catalog: buildWorkbook_catalog, archive: buildWorkbook_archive, all: buildWorkbook_all,
+  plan: buildWorkbook_plan, cost: buildWorkbook_cost
 };
 
 function exportButton(key, label){
