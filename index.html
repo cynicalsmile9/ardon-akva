@@ -929,7 +929,9 @@ async function archiveSnapshot(col, docId, oldData, action){
   try{
     const plot = currentPlot();
     await Store.addDoc("archive", {
-      section: col, docId, date: oldData.date || docId,
+      // в поле date — только дата вида ГГГГ-ММ-ДД (так требуют правила базы);
+      // у кормов и планов id документа не дата, для них date пустая
+      section: col, docId, date: oldData.date || (/^\d{4}-\d{2}-\d{2}$/.test(docId) ? docId : ""),
       action, snapshot: oldData, archivedAt: Date.now(),
       plotId: currentPlotId || LEGACY_PLOT_ID, plotName: plot ? plot.name : "Ардон"
     });
