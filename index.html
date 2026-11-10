@@ -1459,17 +1459,18 @@ function renderFeed(){
   const existing = state.feed[editDate];
   const dateList = Object.values(state.feed).sort((a,b)=>b.date.localeCompare(a.date));
   return `
-  ${topbar("Кормление", "Расход и возврат корма по бассейнам, норма на фактическое стадо и отклонение от неё")}
+  ${topbar("Кормление", "Чистый расход корма по бассейнам, возврат и сравнение расхода с нормой")}
   <div class="panel">
     <div class="panel-head"><h2>Внести кормление за день</h2></div>
     <div class="panel-body">
       <form id="feedForm">
         <div class="field" style="max-width:200px;"><label>Дата</label><input type="date" id="feedDate" name="date" value="${esc(editDate)}"></div>
-        <label style="margin-top:4px;">Расход корма, кг</label>
+        <label style="margin-top:4px;">Расход корма (чистый), кг</label>
+        <div class="hint" style="margin-bottom:8px;">Введите уже рассчитанный чистый расход. Возврат запишите отдельно ниже — повторно вычитать его из расхода не нужно.</div>
         <div class="grid-entry">
           ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="u_${p}" value="${existing&&existing.used&&existing.used[p]!==undefined? esc(existing.used[p]):0}"></div>`).join("")}
         </div>
-        <label>Возврат корма, кг</label>
+        <label>Возврат корма, кг (отдельный учёт)</label>
         <div class="grid-entry">
           ${POOLS.map(p=>`<div class="cell"><label>${poolLabel(p)}</label><input type="number" step="0.1" min="0" name="r_${p}" value="${existing&&existing.returned&&existing.returned[p]!==undefined? esc(existing.returned[p]):0}"></div>`).join("")}
         </div>
@@ -1479,9 +1480,9 @@ function renderFeed(){
     </div>
   </div>
   <div class="panel">
-    <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней · в ячейках бассейнов: расход / возврат, кг</span>${exportButton("feed")}</div></div>
+    <div class="panel-head"><h2>История</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${dateList.length} дней · в ячейках бассейнов: чистый расход / возврат, кг</span>${exportButton("feed")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th>Расход, итого</th><th>Возврат, итого</th><th>Чистый расход</th><th>Норма, кг</th><th>Откл.</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th>${POOLS.map(p=>`<th>${poolLabel(p)}</th>`).join("")}<th>Чистый расход, итого</th><th>Возврат, итого</th><th>Норма, кг</th><th>Откл.</th><th></th></tr></thead>
       <tbody>${dateList.length? dateList.map(r=>{
         const u = dayTotal(r,"used"), ret = dayTotal(r,"returned");
         return `<tr><td>${fmtD(r.date)}</td>
@@ -1490,10 +1491,10 @@ function renderFeed(){
           const pr = r.returned && r.returned[p]!==undefined ? num(r.returned[p]) : 0;
           return pu||pr ? `<td class="num">${fmtN(pu,1)} / ${fmtN(pr,1)}</td>` : `<td class="num hint">–</td>`;
         }).join("")}
-        <td class="num">${fmtN(u,1)}</td><td class="num">${fmtN(ret,1)}</td><td class="num"><b>${fmtN(u-ret,1)}</b></td>
+        <td class="num"><b>${fmtN(u,1)}</b></td><td class="num">${fmtN(ret,1)}</td>
         ${(()=>{ const nf = econDayNormFact(r.date); return nf.norm!==null ? `<td class="num">${fmtN(nf.norm,1)}</td><td>${econDevTag(econPct(nf.fact, nf.norm), "abs")}</td>` : `<td class="num hint">–</td><td></td>`; })()}
         <td><button class="btn ghost small" data-edit-feed="${esc(r.date)}">изменить</button> <button class="btn danger" data-del="feed:${esc(r.date)}">удалить</button></td></tr>`;
-      }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+7}">Пока нет записей</td></tr>`}
+      }).join("") : `<tr class="empty-row"><td colspan="${POOLS.length+6}">Пока нет записей</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -2185,9 +2186,9 @@ function renderHelp(){
     <p>5. Раздел <b>«ЧП»</b> — для происшествий, из-за которых погибла рыба (авария, отключение электричества, замор и т.п.), отдельно от обычного ежедневного отхода. Укажите дату, бассейн, сколько погибло и опишите, что случилось. Это число сразу прибавляется к обычному отходу и автоматически учитывается в остатке стада, на дашборде, в сводке и на графиках — вносить его повторно в «Отход» не нужно.</p>
     <p>6. Раздел <b>«Навески»</b> — периодически (например, раз в 1–2 недели) взвешивайте рыбу и вносите среднюю навеску (кг на одну рыбу) по каждому бассейну. По этим замерам программа сама считает <b>кормовой коэффициент</b> за выбранный период отдельно для каждого бассейна: берётся последний замер навески на начало и на конец периода, прирост биомассы = остаток стада × навеска на эти даты, а корм суммируется за дни между замерами. Кормовой коэффициент = корм за период (кг) ÷ прирост биомассы (кг).</p>
     <p>7. Раздел <b>«Корма и нормы»</b> — справочник кормов производителей: таблица норм кормления (% от массы рыбы в сутки по навескам и температуре), ожидаемый кормовой коэффициент и цены по датам. Новый корм добавляется вставкой таблицы из Excel; новая цена — одной строкой «с даты». Старые цены остаются: по ним пересчитывается себестоимость прошлых дней.</p>
-    <p>8. В <b>«Кормлении»</b> под полями расхода показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение факта от неё — сразу, пока вводите цифры. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
+    <p>8. В <b>«Кормлении»</b> в поле <b>«Расход корма (чистый), кг»</b> вносите сразу чистый расход. Возврат указывайте отдельно: он сохраняется в журнале и выгрузке, но не вычитается из расхода повторно. Например, при расходе 100 кг и возврате 10 кг в расчётах используются 100 кг. Под полями показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение внесённого чистого расхода от неё. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
     <p>9. <b>«Расчёт роста»</b> — план выращивания по бассейну или по всему участку : привес = навеска × норма корма ÷ кормовой коэффициент, отход — фактический процент хозяйства (или заданный вручную), температуры — по журналу «Температура». План фиксирует нормы и цены на момент создания; сравнение с фактом — по кормлению, взвешиваниям, численности, затратам и себестоимости 1 кг.</p>
-    <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (цена при зарыблении), корм (чистый расход × цена выбранного корма на дату), кислород (кг О2 на кг корма × цена), прочие затраты. При пересадке затраты переходят вместе с рыбой, при продаже списываются.</p>
+    <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (стоимость партии при зарыблении), корм (внесённый чистый расход × цена выбранного корма на дату кормления), кислород (тот же чистый расход × кг О2 на 1 кг корма × цена кислорода), прочие затраты. Возврат корма в этих формулах повторно не вычитается. При пересадке затраты переходят вместе с рыбой, при продаже списываются. Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним внесённым навескам.</p>
     <h3>Что считается автоматически</h3>
     <p>— Остаток стада по каждому бассейну (зарыбление плюс пересадки минус накопленный отход, включая отход по ЧП) — отдельным разделом <b>«Численность стада»</b> с историей по дням, по аналогии с «Отходом».<br>
     — Итоги по кормлению и отходу за день (журнал «Отход» + «ЧП» вместе).<br>
@@ -2990,7 +2991,8 @@ function econLedger(){
       const fd = state.feed && state.feed[date];
       if(fd){
         POOLS.forEach(p=>{
-          const net = Math.max(0, num(fd.used && fd.used[p]) - num(fd.returned && fd.returned[p]));
+          // used уже содержит чистый расход; returned ведётся отдельно.
+          const net = Math.max(0, num(fd.used && fd.used[p]));
           if(!(net > 0)) return;
           let kind = fd.kinds && fd.kinds[p];
           if(!kind){ kind = econDefaultKind(p, date); day[p].auto = true; issues.autoKind++; }
@@ -3673,8 +3675,7 @@ function updateFeedNormLive(){
     const sel = row.querySelector("select");
     const nm = econNorm(p, date, sel && sel.value ? sel.value : null);
     const used = num((form.querySelector(`[name="u_${CSS.escape(p)}"]`)||{}).value);
-    const ret = num((form.querySelector(`[name="r_${CSS.escape(p)}"]`)||{}).value);
-    const fact = Math.max(0, used - ret);
+    const fact = Math.max(0, used);
     const nCell = row.querySelector("[data-norm-cell]"), fCell = row.querySelector("[data-fact-cell]"), dCell = row.querySelector("[data-dev-cell]");
     if(nCell) nCell.innerHTML = nm ? (nm.fasting ? '0 <span class="hint">разгр.</span>' : fmtN(nm.kg,1)) : "—";
     if(fCell) fCell.textContent = fmtN(fact,1);
@@ -3694,7 +3695,7 @@ function econDayNormFact(date){
   POOLS.forEach(p=>{
     const nm = econNorm(p, date, doc && doc.kinds && doc.kinds[p]);
     if(nm){ norm += nm.kg; any = true; }
-    if(doc) fact += Math.max(0, num(doc.used && doc.used[p]) - num(doc.returned && doc.returned[p]));
+    if(doc) fact += Math.max(0, num(doc.used && doc.used[p]));
   });
   return { norm: any ? norm : null, fact };
 }
@@ -4007,13 +4008,12 @@ function buildWorkbook_population(){
 
 function buildWorkbook_feed(){
   const rows = Object.values(state.feed).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата", ...POOLS.map(p=>"Расход "+poolLabelRaw(p)), "Итого расход", ...POOLS.map(p=>"Возврат "+poolLabelRaw(p)), "Итого возврат", "Чистый расход"]];
+  const aoa = [["Дата", ...POOLS.map(p=>"Чистый расход "+poolLabelRaw(p)), "Итого чистый расход", ...POOLS.map(p=>"Возврат "+poolLabelRaw(p)), "Итого возврат"]];
   rows.forEach(r=>{
     const u = dayTotal(r,"used"), ret = dayTotal(r,"returned");
     aoa.push([fmtDRaw(r.date),
       ...POOLS.map(p=> r.used&&r.used[p]!==undefined? num(r.used[p]) : ""), u,
-      ...POOLS.map(p=> r.returned&&r.returned[p]!==undefined? num(r.returned[p]) : ""), ret,
-      Number((u-ret).toFixed(2))]);
+      ...POOLS.map(p=> r.returned&&r.returned[p]!==undefined? num(r.returned[p]) : ""), ret]);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Кормление");
