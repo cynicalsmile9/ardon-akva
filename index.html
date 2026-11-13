@@ -307,13 +307,13 @@ const Store = {
     mem[col] = mem[col] || {};
     return {...mem[col]};
   },
-  watchCollection(col, cb){
+  watchCollection(col, cb, onError){
     if(db){
       return db.collection(col).onSnapshot(snap=>{
         const out = {};
         snap.docs.forEach(d=>{ out[d.id] = d.data(); });
         cb(out);
-      }, err=>{ console.warn("db watch error", col, err); });
+      }, err=>{ console.warn("db watch error", col, err); if(onError) onError(err); });
     }
     mem[col] = mem[col] || {};
     memWatchers[col] = memWatchers[col] || [];
@@ -354,8 +354,8 @@ let plotUnsubs = [];
 let plotsBooted = false;
 let seedingDefaultPlot = false;
 
-function plotColName(base){
-  return (currentPlotId && currentPlotId !== LEGACY_PLOT_ID) ? base + "__" + currentPlotId : base;
+function plotColName(base, plotId=currentPlotId){
+  return (plotId && plotId !== LEGACY_PLOT_ID) ? base + "__" + plotId : base;
 }
 function pcol(base){
   return PLOT_SCOPED_COLLECTIONS.indexOf(base) !== -1 ? plotColName(base) : base;
@@ -386,6 +386,30 @@ function subscribePlotCollections(){
     state[col] = {};
     const unsub = Store.watchCollection(plotColName(col), data=>{ state[col]=dropSyntheticDocs(col, data); scheduleRender(); });
     plotUnsubs.push(unsub);
+  });
+}
+
+// Читаем только журналы, нужные для распределения общих расходов.
+// Одна общая запись хранится в expenses; копии сумм по участкам не создаются.
+const expensePlotWatches = {};
+function syncExpensePlotData(){
+  Object.keys(expensePlotWatches).forEach(id=>{
+    if(state.plots[id]) return;
+    expensePlotWatches[id].forEach(unsub=>unsub());
+    delete expensePlotWatches[id]; delete state.expensePlotData[id];
+  });
+  Object.keys(state.plots).forEach(id=>{
+    if(expensePlotWatches[id]) return;
+    // feed и o2 нужны для той же оси дат, что и в обычном расчёте численности.
+    const cols = ["stocking","mortality","incidents","population","transfers","naveski","feed","o2"];
+    const context = {ready:false,failed:false,data:{feed:{},o2:{}}};
+    state.expensePlotData[id] = context;
+    const loaded = new Set(), failed = new Set();
+    expensePlotWatches[id] = cols.map(col=>Store.watchCollection(plotColName(col,id),data=>{
+      context.data[col] = dropSyntheticDocs(col,data);
+      loaded.add(col); failed.delete(col); context.failed = failed.size>0; context.ready = loaded.size===cols.length && !context.failed;
+      scheduleRender();
+    },()=>{ failed.add(col); context.failed = true; context.ready = false; scheduleRender(); }));
   });
 }
 
@@ -423,6 +447,7 @@ async function onPlotsChanged(data){
     subscribePlotCollections();
   }
   syncPoolsFromPlot();
+  syncExpensePlotData();
   scheduleRender();
 }
 
@@ -431,7 +456,7 @@ async function onPlotsChanged(data){
    ------------------------------------------------------------------- */
 const state = {
   stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{},
-  feeds:{}, settings:{}, plans:{}, expenses:{}
+  feeds:{}, settings:{}, plans:{}, expenses:{}, sharedExpenses:{}, expensePlotData:{}
 };
 let renderQueued = false;
 function scheduleRender(){
@@ -524,6 +549,10 @@ function startDataStore(){
   // Общие на всё хозяйство коллекции — не зависят от выбранного участка.
   ["catalog","archive","feeds","settings"].forEach(col=>{
     Store.watchCollection(col, data=>{ state[col]=data; scheduleRender(); });
+  });
+  Store.watchCollection("expenses",data=>{
+    state.sharedExpenses = Object.fromEntries(Object.entries(data).filter(([,e])=>Array.isArray(e.targets) && e.targets.length));
+    scheduleRender();
   });
   // Участки и, следом за ними, их собственные журналы (см. onPlotsChanged).
   Store.watchCollection("plots", onPlotsChanged);
@@ -683,26 +712,21 @@ function renderPendingScreen(){
    Derived computations — this is what used to be manual dragging of
    formulas / copying between sheets in the original workbook.
    ------------------------------------------------------------------- */
-function allDates(){
+function allDates(data=state){
   // Температура ведётся как отдельный, самостоятельный журнал (в исходном
   // файле её даты уходят далеко за пределы текущего цикла выращивания),
   // поэтому она не участвует в общей оси дат стада/отхода/корма/графиков.
   const s = new Set();
-  Object.values(state.mortality).forEach(d=>s.add(d.date));
-  Object.values(state.feed).forEach(d=>s.add(d.date));
-  Object.values(state.o2).forEach(d=>s.add(d.date));
-  Object.values(state.stocking).forEach(d=>s.add(d.date));
-  Object.values(state.transfers).forEach(d=>s.add(d.date));
-  Object.values(state.incidents).forEach(d=>s.add(d.date));
-  Object.values(state.population).forEach(d=>{ if(d && d.date) s.add(d.date); });
+  ["mortality","feed","o2","stocking","transfers","incidents"].forEach(col=>Object.values(data[col]||{}).forEach(d=>s.add(d.date)));
+  Object.values(data.population||{}).forEach(d=>{ if(d && d.date) s.add(d.date); });
   return [...s].sort();
 }
 
 // Отход из-за ЧП по дням/бассейнам — {date: {pool: count}}, чтобы его можно
 // было прибавлять к обычному отходу везде, где считается итог за день.
-function incidentValuesByDate(){
+function incidentValuesByDate(data=state){
   const out = {};
-  Object.values(state.incidents).forEach(inc=>{
+  Object.values(data.incidents||{}).forEach(inc=>{
     out[inc.date] = out[inc.date] || {};
     out[inc.date][inc.pool] = (out[inc.date][inc.pool]||0) + num(inc.count);
   });
@@ -729,13 +753,13 @@ function dayMortTotal(date, incByDate){
 // Снимки фактической численности по дням/бассейнам — первичные, выверенные цифры
 // учёта: в них уже учтены уточнения по фактическим навескам и пересадки,
 // не попавшие в журналы. Где снимок есть — остаток берётся из него как есть.
-function populationSnapshots(){
+function populationSnapshots(data=state,pools=POOLS){
   const snaps = {};
-  Object.values(state.population).forEach(d=>{
+  Object.values(data.population||{}).forEach(d=>{
     if(!d || !d.date) return;
     const vals = d.values || {};
     const row = {};
-    POOLS.forEach(p=>{
+    pools.forEach(p=>{
       const v = vals[p];
       if(v !== undefined && v !== null && v !== "") row[p] = num(v);
     });
@@ -744,46 +768,46 @@ function populationSnapshots(){
   return snaps;
 }
 
-function buildPopulation(){
-  const dates = allDates();
+function buildPopulation(data=state,pools=POOLS){
+  const dates = allDates(data);
   const stockByDate = {};
-  Object.values(state.stocking).forEach(s=>{
+  Object.values(data.stocking||{}).forEach(s=>{
     stockByDate[s.date] = stockByDate[s.date] || {};
     stockByDate[s.date][s.pool] = (stockByDate[s.date][s.pool]||0) + num(s.count);
   });
   const transferByDate = {};
-  Object.values(state.transfers).forEach(t=>{
+  Object.values(data.transfers||{}).forEach(t=>{
     transferByDate[t.date] = transferByDate[t.date] || [];
     transferByDate[t.date].push(t);
   });
-  const incByDate = incidentValuesByDate();
-  const snaps = populationSnapshots();
+  const incByDate = incidentValuesByDate(data);
+  const snaps = populationSnapshots(data,pools);
   const snapDates = Object.keys(snaps).sort();
   const lastSnapDate = snapDates.length ? snapDates[snapDates.length-1] : null;
-  const running = {}; POOLS.forEach(p=>running[p]=0);
-  const started = {}; POOLS.forEach(p=>started[p]=false);
+  const running = {}; pools.forEach(p=>running[p]=0);
+  const started = {}; pools.forEach(p=>started[p]=false);
   const byDate = {};
   let baseSnap = null;   // фактический остаток на дату последнего снимка
   let baseCalc = null;   // расчётный остаток на ту же дату
   dates.forEach(date=>{
     const sAdd = stockByDate[date] || {};
-    const mVals = (state.mortality[date] && state.mortality[date].values) || {};
+    const mVals = (data.mortality && data.mortality[date] && data.mortality[date].values) || {};
     const iVals = incByDate[date] || {};
-    POOLS.forEach(p=>{
+    pools.forEach(p=>{
       if(sAdd[p]){ running[p] += sAdd[p]; started[p]=true; }
       if(mVals[p]){ running[p] = Math.max(0, running[p] - num(mVals[p])); }
       if(iVals[p]){ running[p] = Math.max(0, running[p] - num(iVals[p])); }
     });
     (transferByDate[date]||[]).forEach(t=>{
       const c = num(t.count);
-      if(POOLS.includes(t.from)) running[t.from] = Math.max(0, running[t.from] - c);
-      if(POOLS.includes(t.to)){ running[t.to] += c; started[t.to] = true; }
+      if(pools.includes(t.from)) running[t.from] = Math.max(0, running[t.from] - c);
+      if(pools.includes(t.to)){ running[t.to] += c; started[t.to] = true; }
     });
     const snap = snaps[date];
     if(snap){
       // Есть снимок фактической численности — он и есть остаток на этот день.
       const row = {};
-      POOLS.forEach(p=>{
+      pools.forEach(p=>{
         row[p] = (snap[p] !== undefined) ? snap[p] : 0;
         if(row[p] > 0) started[p] = true;
       });
@@ -792,7 +816,7 @@ function buildPopulation(){
     } else if(baseSnap && lastSnapDate && date > lastSnapDate){
       // После последнего снимка ведём остаток от него по журналам.
       const row = {};
-      POOLS.forEach(p=>{
+      pools.forEach(p=>{
         row[p] = Math.max(0, num(baseSnap[p]) + (num(running[p]) - num(baseCalc[p])));
         if(row[p] > 0) started[p] = true;
       });
@@ -2194,7 +2218,8 @@ function renderHelp(){
     <p>8. В <b>«Кормлении»</b> в поле <b>«Расход корма (чистый), кг»</b> вносите сразу чистый расход. Возврат указывайте отдельно: он сохраняется в журнале и выгрузке, но не вычитается из расхода повторно. Например, при расходе 100 кг и возврате 10 кг в расчётах используются 100 кг. Под полями показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение внесённого чистого расхода от неё. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
     <p>9. <b>«Расчёт роста»</b> — план выращивания по бассейну или по всему участку : привес = навеска × норма корма ÷ кормовой коэффициент, отход — фактический процент хозяйства (или заданный вручную), температуры — по журналу «Температура». План фиксирует нормы и цены на момент создания; сравнение с фактом — по кормлению, взвешиваниям, численности, затратам и себестоимости 1 кг.</p>
     <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (стоимость партии при зарыблении), корм (внесённый чистый расход × цена выбранного корма на дату кормления), кислород и прочие затраты (внесённые вами суммы расходов). Возврат корма повторно не вычитается. Кислород не начисляется автоматически по корму: в блоке «Прочие затраты» выберите статью <b>«Кислород»</b>, дату, сумму и нужные бассейны. В итогах эта сумма учитывается один раз в колонке «Кислород».</p>
-    <p>Для каждой записи расходов можно выбрать весь участок или отметить один / несколько бассейнов. Сумма распределяется по биомассе выбранных бассейнов с рыбой на дату расхода. Если навески есть не у всех — по количеству рыб, с предупреждением. Пустые бассейны долю не получают. Каждая запись сохраняет свой набор бассейнов: новые расходы на Б1, Б2 и Б3 не перераспределяют прежние расходы, внесённые только на Б1.</p>
+    <p>Для каждой записи расходов можно выбрать весь текущий участок, отдельные бассейны текущего участка или <b>«Бассейны разных участков»</b>. В последнем случае отметьте бассейны под названиями нужных участков: одна общая сумма распределяется между всеми отмеченными бассейнами, а каждый участок получает только свою долю. В журнале видны сумма всей записи и доля текущего участка. Удаление общей записи убирает её доли из всех выбранных участков.</p>
+    <p>Сумма распределяется по биомассе выбранных бассейнов с рыбой на дату расхода. Если навески есть не у всех — по количеству рыб, с предупреждением. Пустые бассейны долю не получают. Каждая запись сохраняет свой набор бассейнов: новые расходы на Б1, Б2 и Б3 не меняют выбор бассейнов у прежних записей. При исправлении численности или навесок на дату расхода доли этой записи пересчитываются, в том числе между участками.</p>
     <p>Внутри дня расходы начисляются до пересадок. При пересадке переносится доля всех накопленных затрат: <b>затраты исходного бассейна × пересаженное количество ÷ количество перед этой пересадкой</b>. В принимающем бассейне она прибавляется к его прежним затратам; итог по участку от пересадки не меняется. Общие расходы уже входят в суммы бассейнов — повторно прибавлять их нельзя. При продаже себестоимость списывается по проданному весу. При отходе затраты остаются на выжившей рыбе; если бассейн полностью опустел, остаток затрат показывается в списаниях.</p>
     <p>Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним навескам. Выберите <b>«Себестоимость на дату»</b>: таблица всех бассейнов и накопленные списания покажут состояние на конец этого дня. В <b>«Истории себестоимости»</b> выберите начало периода и отдельный бассейн либо все бассейны участка. При исправлении исходных записей история пересчитывается. Пустые бассейны остаются видны с нулевым остатком, а руб/кг для них не рассчитываются. Строка «Проверка общей суммы» связывает все начисленные затраты с остатком на рыбе, продажами, списаниями и нераспределёнными суммами.</p>
     <h3>Что считается автоматически</h3>
@@ -2300,10 +2325,11 @@ function wireActiveSection(){
   main.querySelectorAll("[data-del]").forEach(btn=>{
     btn.addEventListener("click", async ()=>{
       const [col,id] = btn.dataset.del.split(":");
-      if(!confirm("Удалить запись?")) return;
+      const shared = col==="sharedExpenses";
+      if(!confirm(shared ? "Удалить общую запись расходов? Её доли будут убраны из всех выбранных участков." : "Удалить запись?")) return;
       const old = state[col] && state[col][id];
-      await Store.deleteDoc(pcol(col), id);
-      await archiveSnapshot(col, id, old, "delete");
+      await Store.deleteDoc(shared ? "expenses" : pcol(col), id);
+      await archiveSnapshot(shared ? "expenses" : col, id, old, "delete");
       toast("Запись удалена");
     });
   });
@@ -2909,19 +2935,20 @@ function econFcrFor(row){ return row && num(row.fcr) > 0 ? num(row.fcr) : econFa
 // Последний известный вес рыбы в бассейне (кг) не позже даты:
 // навеска → вес при зарыблении → вес при пересадке в этот бассейн.
 function econWeightIndex(){
-  return econCached("windex", ()=>{
+  return econCached("windex", ()=>econBuildWeightIndex(state,POOLS));
+}
+function econBuildWeightIndex(data,pools){
     const idx = {};
-    POOLS.forEach(p=> idx[p] = []);
-    Object.values(state.naveski||{}).forEach(r=>{
+    pools.forEach(p=> idx[p] = []);
+    Object.values(data.naveski||{}).forEach(r=>{
       if(!r || !r.values) return;
-      POOLS.forEach(p=>{ const v = r.values[p]; if(v !== undefined && v !== null && v !== "" && num(v) > 0) idx[p].push({ date:r.date, kg:num(v), src:"навеска" }); });
+      pools.forEach(p=>{ const v = r.values[p]; if(v !== undefined && v !== null && v !== "" && num(v) > 0) idx[p].push({ date:r.date, kg:num(v), src:"навеска" }); });
     });
-    Object.values(state.stocking||{}).forEach(s=>{ if(idx[s.pool] && num(s.weight) > 0) idx[s.pool].push({ date:s.date, kg:num(s.weight), src:"зарыбление" }); });
-    Object.values(state.transfers||{}).forEach(t=>{ if(idx[t.to] && num(t.weight) > 0) idx[t.to].push({ date:t.date, kg:num(t.weight), src:"пересадка" }); });
+    Object.values(data.stocking||{}).forEach(s=>{ if(idx[s.pool] && num(s.weight) > 0) idx[s.pool].push({ date:s.date, kg:num(s.weight), src:"зарыбление" }); });
+    Object.values(data.transfers||{}).forEach(t=>{ if(idx[t.to] && num(t.weight) > 0) idx[t.to].push({ date:t.date, kg:num(t.weight), src:"пересадка" }); });
     const prio = { "навеска":0, "зарыбление":1, "пересадка":2 };
-    POOLS.forEach(p=> idx[p].sort((a,b)=> a.date.localeCompare(b.date) || prio[b.src]-prio[a.src]));
+    pools.forEach(p=> idx[p].sort((a,b)=> a.date.localeCompare(b.date) || prio[b.src]-prio[a.src]));
     return idx;
-  });
 }
 function econLastWeight(pool, date){
   const list = econWeightIndex()[pool] || [];
@@ -2993,30 +3020,78 @@ function econSaleWeight(t, averageKg){
 }
 // Затраты дня начисляются до пересадок. Для распределения расходов и
 // переноса затрат используется одна и та же численность перед операциями.
-function econTransferOpening(date){
-  const transfers = Object.values(state.transfers||{}).filter(t=>t.date===date && POOLS.includes(t.from) && (t.to===OUT || POOLS.includes(t.to)))
+function econTransferOpening(date,data=state,pools=POOLS,population,weightIndex){
+  const P = population || (data===state ? econPopIndex() : buildPopulation(data,pools));
+  const weightsByPool = weightIndex || (data===state ? econWeightIndex() : econBuildWeightIndex(data,pools));
+  const transfers = Object.values(data.transfers||{}).filter(t=>t.date===date && pools.includes(t.from) && (t.to===OUT || pools.includes(t.to)))
     .sort((a,b)=>num(a.createdAt)-num(b.createdAt));
   const counts = {}, biomass = {};
-  POOLS.forEach(p=> counts[p] = econPopAt(p,date));
+  pools.forEach(p=> counts[p] = populationAt(P.byDate,P.dates,date,p));
   transfers.forEach(t=>{ counts[t.from] += num(t.count); if(t.to!==OUT) counts[t.to] -= num(t.count); });
-  POOLS.forEach(p=>{
+  pools.forEach(p=>{
     counts[p] = Math.max(0,counts[p]);
-    const weights = (econWeightIndex()[p]||[]).filter(w=>w.date<=date && !(w.date===date && w.src==="пересадка"));
+    const weights = (weightsByPool[p]||[]).filter(w=>w.date<=date && !(w.date===date && w.src==="пересадка"));
     const w = weights.length ? weights[weights.length-1] : null;
     biomass[p] = counts[p]===0 ? 0 : (w ? counts[p]*w.kg : null);
   });
   return {transfers,counts,biomass};
+}
+function econExpenseRecords(){
+  const local = Object.entries(state.expenses||{}).filter(([,e])=>!Array.isArray(e.targets) || !e.targets.length)
+    .map(([id,e])=>({...e,id,shared:false}));
+  const shared = Object.entries(state.sharedExpenses||{}).filter(([,e])=>e.ownerPlotId===currentPlotId || (e.targets||[]).some(t=>t.plotId===currentPlotId))
+    .map(([id,e])=>({...e,id,shared:true}));
+  return local.concat(shared);
+}
+function econExpenseTargetLabel(t){
+  const plot = (state.plots||{})[t.plotId];
+  return (plot ? plot.name : "Недоступный участок")+" / "+poolLabelRaw(t.pool);
+}
+function econExpenseTargets(e){
+  const seen = new Set();
+  return (e.targets||[]).filter(t=>{
+    if(!t || typeof t.plotId!=="string" || typeof t.pool!=="string") return false;
+    const key = JSON.stringify([t.plotId,t.pool]);
+    if(seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+}
+function econExpensePlotOpening(plotId,date){
+  const plot = (state.plots||{})[plotId];
+  const context = (state.expensePlotData||{})[plotId];
+  if(!plot || !Array.isArray(plot.pools)) return {error:"Участок не найден — проверьте распределение общей записи"};
+  if(!context || !context.ready) return {error:context && context.failed ? "Не удалось загрузить данные участка «"+plot.name+"»" : "Загружаются данные участка «"+plot.name+"»"};
+  const P = econCached("expense-pop|"+plotId,()=>buildPopulation(context.data,plot.pools));
+  const W = econCached("expense-weight|"+plotId,()=>econBuildWeightIndex(context.data,plot.pools));
+  return econTransferOpening(date,context.data,plot.pools,P,W);
 }
 function econExpensePools(e){
   if(Array.isArray(e.pools) && e.pools.length) return [...new Set(e.pools)].filter(p=>POOLS.includes(p));
   return e.pool ? (POOLS.includes(e.pool) ? [e.pool] : []) : POOLS.slice();
 }
 function econExpenseScopeLabel(e){
+  if(e.targets && e.targets.length) return econExpenseTargets(e).map(econExpenseTargetLabel).join(", ");
   const pools = Array.isArray(e.pools) && e.pools.length ? [...new Set(e.pools)] : (e.pool ? [e.pool] : []);
   return pools.length ? pools.map(poolLabelRaw).join(", ") : "весь участок";
 }
 function econExpenseCategory(e){ return String(e.category||"").trim().toLowerCase()==="кислород" ? "o2" : "other"; }
 function econExpenseAllocation(e, opening){
+  if(e.targets && e.targets.length){
+    const contexts = {}, entries = [];
+    for(const t of econExpenseTargets(e)){
+      if(!contexts[t.plotId]) contexts[t.plotId] = econExpensePlotOpening(t.plotId,e.date);
+      const ctx = contexts[t.plotId];
+      if(ctx.error) return {amounts:{},allAmounts:[],basis:"biomass",unallocated:0,pending:ctx.error};
+      if(ctx.counts[t.pool]===undefined) return {amounts:{},allAmounts:[],basis:"biomass",unallocated:0,pending:"Бассейн удалён или переименован — проверьте распределение общей записи"};
+      if(ctx.counts[t.pool]>0) entries.push({...t,n:ctx.counts[t.pool],kg:ctx.biomass[t.pool]});
+    }
+    const byBiomass = entries.every(t=>t.kg!==null && t.kg>0);
+    const total = entries.reduce((s,t)=>s+(byBiomass ? t.kg : t.n),0);
+    const allAmounts = entries.map(t=>({...t,amount:total>0 ? num(e.amount)*(byBiomass ? t.kg : t.n)/total : 0}));
+    const amounts = Object.fromEntries(allAmounts.filter(t=>t.plotId===currentPlotId).map(t=>[t.pool,t.amount]));
+    const owner = e.ownerPlotId || econExpenseTargets(e)[0]?.plotId;
+    return {amounts,allAmounts,basis:byBiomass ? "biomass" : "count",unallocated:total>0 || owner!==currentPlotId ? 0 : num(e.amount),totalUnallocated:total>0 ? 0 : num(e.amount)};
+  }
   const {counts,biomass} = opening || econTransferOpening(e.date);
   const pools = econExpensePools(e).filter(p=>counts[p]>0);
   const byBiomass = pools.every(p=>biomass[p]!==null && biomass[p]>0);
@@ -3032,7 +3107,7 @@ function econLedger(){
     const cats = ["fry","feed","o2","other"];
     const zero = ()=>({fry:0, feed:0, o2:0, other:0});
     const dateSet = new Set(P.dates);
-    const expenses = Object.values(state.expenses||{}).filter(e=> e && e.date);
+    const expenses = econExpenseRecords().filter(e=> e && e.date);
     expenses.forEach(e=> dateSet.add(e.date));
     const dates = [...dateSet].sort();
     const stockByDate = {}, expByDate = {};
@@ -3076,6 +3151,7 @@ function econLedger(){
       (expByDate[date]||[]).forEach(e=>{
         const cat = econExpenseCategory(e);
         const allocation = econExpenseAllocation(e,opening);
+        if(allocation.pending){ issues.expenses.push({date,text:`«${e.category}»: ${allocation.pending}. Распределение ещё не учтено в итогах`}); return; }
         Object.entries(allocation.amounts).forEach(([p,part])=>{ run[p][cat] += part; day[p][cat] += part; });
         unallocated[cat] += allocation.unallocated;
         if(allocation.unallocated) issues.expenses.push({date,text:`«${e.category}»: ${econExpenseScopeLabel(e)} — нет рыбы для распределения ${fmtN(e.amount,2)} руб`});
@@ -3651,23 +3727,33 @@ function drawPlanCharts(retries){
 function expenseFromForm(form){
   const f = new FormData(form);
   const pools = f.get("scope")==="selected" ? [...new Set(f.getAll("pools"))].filter(p=>POOLS.includes(p)) : [];
-  return {date:f.get("date"), category:String(f.get("category")||"").trim(),
+  const doc = {date:f.get("date"), category:String(f.get("category")||"").trim(),
     pool:pools.length===1 ? pools[0] : "", pools, amount:Number(f.get("amount")), comment:f.get("comment")||""};
+  if(f.get("scope")==="cross"){
+    doc.targets = econExpenseTargets({targets:f.getAll("targets").map(value=>{ try{const [plotId,pool]=JSON.parse(value);return {plotId,pool};}catch(err){return null;} })});
+    doc.ownerPlotId = currentPlotId;
+  }
+  return doc;
 }
 function updateExpensePreview(){
   const form = document.getElementById("expenseForm");
   if(!form) return;
   const selected = form.elements.scope.value==="selected";
+  const cross = form.elements.scope.value==="cross";
   document.getElementById("expensePools").hidden = !selected;
+  document.getElementById("expenseCrossPools").hidden = !cross;
   form.querySelectorAll('[name="pools"]').forEach(el=> el.disabled = !selected);
+  form.querySelectorAll('[name="targets"]').forEach(el=> el.disabled = !cross);
   const preview = document.getElementById("expensePreview");
   const e = expenseFromForm(form);
   if(selected && !e.pools.length){ preview.textContent = "Выберите хотя бы один бассейн."; return; }
+  if(cross && !e.targets.length){ preview.textContent = "Отметьте нужные бассейны под названиями участков."; return; }
   if(!e.date || !(e.amount>0)){ preview.textContent = "Укажите дату и сумму — здесь появится распределение по бассейнам."; return; }
   const a = econExpenseAllocation(e);
-  if(a.unallocated){ preview.textContent = "На эту дату в выбранных бассейнах нет рыбы. Проверьте дату и выбор бассейнов."; return; }
+  if(a.pending){ preview.textContent = a.pending+". Сохранение станет доступно после загрузки данных."; return; }
+  if(a.unallocated || a.totalUnallocated){ preview.textContent = "На эту дату в выбранных бассейнах нет рыбы. Проверьте дату и выбор бассейнов."; return; }
   preview.textContent = "Распределение " + (a.basis==="biomass" ? "по биомассе" : "по количеству рыб (не хватает навесок)") + ": " +
-    Object.entries(a.amounts).map(([p,amount])=>poolLabelRaw(p)+" — "+fmtN(amount,2)+" руб").join(" · ");
+    (a.allAmounts ? a.allAmounts.map(t=>econExpenseTargetLabel(t)+" — "+fmtN(t.amount,2)+" руб") : Object.entries(a.amounts).map(([p,amount])=>poolLabelRaw(p)+" — "+fmtN(amount,2)+" руб")).join(" · ");
 }
 function costHistorySelection(at){
   const from = renderCost._historyFrom && renderCost._historyFrom <= at ? renderCost._historyFrom : at.slice(0,8)+"01";
@@ -3725,7 +3811,7 @@ function renderCost(){
   if(issues.autoKind) alerts.push(`<div class="alert good">В ${fmtN(issues.autoKind)} записях кормления (бассейн × день) корм не выбран вручную — взят корм по навеске из справочника.</div>`);
   issues.sales.filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}, ${poolLabel(x.pool)}: ${esc(x.text)}.</div>`));
   issues.expenses.filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}: ${esc(x.text)}.</div>`));
-  const expenses = Object.entries(state.expenses||{}).map(([id,e])=>({...e,id})).sort((a,b)=> (b.date||"").localeCompare(a.date||""));
+  const expenses = econExpenseRecords().sort((a,b)=> (b.date||"").localeCompare(a.date||""));
   return `
   ${topbar("Себестоимость", "Фактические затраты на стадо по журналам: малёк, корм, кислород, прочие затраты", exportButton("cost","Выгрузить в Excel"))}
   <div class="panel"><div class="panel-body">
@@ -3780,18 +3866,20 @@ function renderCost(){
         <div class="row">
           <div class="field"><label for="expenseDate">Дата расхода</label><input id="expenseDate" type="date" name="date" value="${todayISO()}" required></div>
           <div class="field"><label for="expenseCategory">Статья</label><input id="expenseCategory" type="text" name="category" list="expenseCats" required placeholder="выберите или впишите"><datalist id="expenseCats">${EXPENSE_CATEGORIES.map(c=>`<option value="${esc(c)}">`).join("")}</datalist></div>
-          <div class="field"><label for="expenseScope">На что относим</label><select id="expenseScope" name="scope"><option value="plot">Весь участок</option><option value="selected">Выбранные бассейны</option></select></div>
+          <div class="field"><label for="expenseScope">На что относим</label><select id="expenseScope" name="scope"><option value="plot">Весь текущий участок</option><option value="selected">Бассейны текущего участка</option><option value="cross">Бассейны разных участков</option></select></div>
           <div class="field"><label for="expenseAmount">Общая сумма, руб</label><input id="expenseAmount" type="number" step="0.01" min="0.01" name="amount" required></div>
         </div>
         <div id="expensePools" hidden><div class="hint" style="margin-bottom:8px;">Отметьте один или несколько бассейнов:</div><div class="row" style="gap:14px; flex-wrap:wrap;">${POOLS.map(p=>`<label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" name="pools" value="${esc(p)}" style="width:auto;">${poolLabel(p)}</label>`).join("")}</div></div>
+        <div id="expenseCrossPools" hidden>${Object.entries(state.plots||{}).sort((a,b)=>num(a[1].order)-num(b[1].order)).map(([id,plot])=>`<fieldset style="border:1px solid var(--border); border-radius:8px; padding:12px; margin:10px 0;"><legend>${esc(plot.name)}</legend><div class="row" style="gap:14px; flex-wrap:wrap;">${(plot.pools||[]).map(p=>`<label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" name="targets" aria-label="${esc(plot.name+" / "+poolLabelRaw(p))}" value="${esc(JSON.stringify([id,p]))}" style="width:auto;">${poolLabel(p)}</label>`).join("") || '<span class="hint">Нет бассейнов</span>'}</div></fieldset>`).join("")}</div>
+        <div class="hint" style="margin:12px 0;">Для разных участков создаётся одна общая запись. Сумма делится между всеми отмеченными бассейнами, а в себестоимость каждого участка входит только его доля. Б1 на разных участках — разные бассейны. При исправлении численности или навесок на дату расхода распределение пересчитывается.</div>
         <div class="hint" style="margin:12px 0;">Сумма распределяется только между выбранными бассейнами с рыбой по их биомассе на дату расхода; если навески есть не у всех — по количеству рыб. При одной дате расходы начисляются до пересадок, затем переходят вместе с рыбой. Новые расходы могут относиться на другой набор бассейнов, прежние записи сохраняют свой выбор.</div>
         <div id="expensePreview" class="hint" aria-live="polite" style="margin:12px 0;"></div>
         <div class="hint" style="margin:12px 0;">Статья «Кислород» попадает в колонку «Кислород» и учитывается один раз. Автоматического начисления по корму в фактической себестоимости нет.</div>
         <div class="field"><label>Комментарий</label><input type="text" name="comment"></div>
         <button class="btn" type="submit">Добавить затраты</button>
       </form>
-      <div class="table-wrap" style="margin-top:14px;"><table><thead><tr><th>Дата</th><th>Статья</th><th>На что</th><th>Сумма, руб</th><th>Комментарий</th><th></th></tr></thead><tbody>
-        ${expenses.length ? expenses.map(e=>`<tr><td>${fmtD(e.date)}</td><td style="text-align:left;">${esc(e.category)}</td><td>${esc(econExpenseScopeLabel(e))}</td><td class="num">${fmtN(e.amount,2)}</td><td style="text-align:left; white-space:normal;">${esc(e.comment||"")}</td><td><button class="btn danger" data-del="expenses:${esc(e.id)}">удалить</button></td></tr>`).join("") : `<tr class="empty-row"><td colspan="6">Пока нет записей</td></tr>`}
+      <div class="table-wrap" style="margin-top:14px;"><table><thead><tr><th>Дата</th><th>Статья</th><th>На что</th><th>Сумма всей записи, руб</th><th>Доля текущего участка, руб</th><th>Комментарий</th><th></th></tr></thead><tbody>
+        ${expenses.length ? expenses.map(e=>{const a=econExpenseAllocation(e);return `<tr><td>${fmtD(e.date)}</td><td style="text-align:left;">${esc(e.category)}${e.shared?' <span class="hint">общая запись</span>':''}</td><td style="white-space:normal;">${esc(econExpenseScopeLabel(e))}</td><td class="num">${fmtN(e.amount,2)}</td><td class="num">${a.pending?'ожидает данных':fmtN(Object.values(a.amounts).reduce((s,x)=>s+x,0),2)}</td><td style="text-align:left; white-space:normal;">${esc(e.comment||"")}</td><td><button class="btn danger" data-del="${e.shared?'sharedExpenses':'expenses'}:${esc(e.id)}">удалить</button></td></tr>`;}).join("") : `<tr class="empty-row"><td colspan="7">Пока нет записей</td></tr>`}
       </tbody></table></div>
     </div>
   </div>`;
@@ -4054,11 +4142,14 @@ function wireEcon(main){
     const doc = expenseFromForm(expenseForm);
     if(!doc.date || !doc.category || !(doc.amount>0) || !Number.isFinite(doc.amount)){ toast("Укажите дату, статью и сумму больше нуля"); return; }
     if(expenseForm.elements.scope.value==="selected" && !doc.pools.length){ toast("Выберите хотя бы один бассейн"); return; }
-    if(econExpenseAllocation(doc).unallocated){ toast("Нет рыбы для распределения — проверьте дату и бассейны"); return; }
+    if(expenseForm.elements.scope.value==="cross" && !doc.targets.length){ toast("Выберите бассейны нужных участков"); return; }
+    const allocation = econExpenseAllocation(doc);
+    if(allocation.pending){ toast(allocation.pending); return; }
+    if(allocation.unallocated || allocation.totalUnallocated){ toast("Нет рыбы для распределения — проверьте дату и бассейны"); return; }
     const btn = expenseForm.querySelector('button[type="submit"]');
     btn.disabled = true;
     try{
-      await Store.addDoc(pcol("expenses"), doc);
+      await Store.addDoc(doc.targets ? "expenses" : pcol("expenses"), doc);
       expenseForm.reset();
       updateExpensePreview();
       toast("Затраты добавлены");
@@ -4124,10 +4215,11 @@ function buildWorkbook_cost(){
   const sales = [["Дата","Бассейн","Количество, шт.","Проданный вес, кг","Вес рассчитан по навеске","Списанная себестоимость, руб"]];
   L.movements.filter(t=>t.to===OUT && t.date<=at).forEach(t=>sales.push([fmtDRaw(t.date),poolLabelRaw(t.from),t.count,t.kg===null?"":r2(t.kg),t.estimated?"да":"нет",r2(t.cost)]));
   XLSX.utils.book_append_sheet(wb,aoaSheet(sales),"Продажи и списания");
-  const expenses = [["Дата","Статья","На что относим","Общая сумма, руб","Распределение","Не распределено, руб","Комментарий"]];
-  Object.values(state.expenses||{}).filter(e=>e.date<=at).sort((a,b)=>a.date.localeCompare(b.date)).forEach(e=>{
+  const expenses = [["Дата","Статья","На что относим","Общая сумма записи, руб","Доля текущего участка, руб","Распределение","Не распределено на текущем участке, руб","Комментарий"]];
+  econExpenseRecords().filter(e=>e.date<=at).sort((a,b)=>a.date.localeCompare(b.date)).forEach(e=>{
     const a = econExpenseAllocation(e);
-    expenses.push([fmtDRaw(e.date),e.category,econExpenseScopeLabel(e),r2(e.amount),Object.entries(a.amounts).map(([p,amount])=>poolLabelRaw(p)+": "+fmtN(amount,2)+" руб").join("; "),r2(a.unallocated),e.comment||""]);
+    const distribution = a.pending || (a.allAmounts ? a.allAmounts.map(t=>econExpenseTargetLabel(t)+": "+fmtN(t.amount,2)+" руб") : Object.entries(a.amounts).map(([p,amount])=>poolLabelRaw(p)+": "+fmtN(amount,2)+" руб")).join("; ");
+    expenses.push([fmtDRaw(e.date),e.category,econExpenseScopeLabel(e),r2(e.amount),a.pending?"ожидает данных":r2(Object.values(a.amounts).reduce((s,x)=>s+x,0)),distribution,r2(a.unallocated),e.comment||""]);
   });
   XLSX.utils.book_append_sheet(wb,aoaSheet(expenses),"Прочие затраты");
   return { wb, filename:"Себестоимость.xlsx" };
