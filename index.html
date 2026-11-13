@@ -256,8 +256,8 @@
 const LEGACY_POOLS = ["1","2","3","4","5","6","7","8","9","10","ЗБ"];
 let POOLS = LEGACY_POOLS; // переопределяется под текущий выбранный участок, см. syncPoolsFromPlot()
 const O2_WARN = 6, O2_BAD = 5;
-const OUT = "OUT"; // виртуальный "бассейн" для продажи/выбытия при пересадке
-function toPoolLabelRaw(v){ return v===OUT ? "Продажа/выбытие" : poolLabelRaw(v); }
+const OUT = "OUT"; // продажа рыбы за пределы участка
+function toPoolLabelRaw(v){ return v===OUT ? "Продажа" : poolLabelRaw(v); }
 
 function poolLabelRaw(p){ if(p==="ЗБ") return "ЗБ"; if(/^\d+$/.test(String(p))) return "Б"+p; return String(p); }
 function todayISO(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
@@ -1262,7 +1262,7 @@ function renderStocking(){
 }
 
 /* ---------------------------------------------------------------------
-   Пересадки — перенос рыбы из одного бассейна в другой (или продажа/выбытие)
+   Пересадки — перенос рыбы из одного бассейна в другой или продажа
    ------------------------------------------------------------------- */
 function renderTransfers(){
   const rows = Object.entries(state.transfers).sort((a,b)=> (b[1].date||"").localeCompare(a[1].date||""));
@@ -1270,7 +1270,7 @@ function renderTransfers(){
   const lastDate = dates[dates.length-1];
   const avail = lastDate ? byDate[lastDate] : {};
   return `
-  ${topbar("Пересадки", "Перенос рыбы между бассейнами — остаток стада в обоих бассейнах пересчитывается автоматически")}
+  ${topbar("Пересадки", "Перенос рыбы между бассейнами или продажа — количество и себестоимость пересчитываются автоматически")}
   <div class="panel">
     <div class="panel-head"><h2>Новая пересадка</h2><span class="hint">${lastDate? "остаток на "+fmtD(lastDate):""}</span></div>
     <div class="panel-body">
@@ -1278,29 +1278,34 @@ function renderTransfers(){
         <div class="row">
           <div class="field"><label>Дата</label><input type="date" name="date" value="${todayISO()}" required></div>
           <div class="field"><label>Из бассейна</label><select name="from">${POOLS.map(p=>`<option value="${p}">${poolLabel(p)}${avail[p]!==undefined?` (${fmtN(avail[p])} шт.)`:""}</option>`).join("")}</select></div>
-          <div class="field"><label>В бассейн</label><select name="to">${POOLS.map(p=>`<option value="${p}">${poolLabel(p)}</option>`).join("")}<option value="${OUT}">Продажа / выбытие</option></select></div>
+          <div class="field"><label>В бассейн / продажа</label><select name="to">${POOLS.map(p=>`<option value="${p}">${poolLabel(p)}</option>`).join("")}<option value="${OUT}">Продажа</option></select></div>
           <div class="field"><label>Количество, шт.</label><input type="number" step="1" min="0" name="count" required></div>
         </div>
         <div class="row">
           <div class="field"><label>Навеска, кг (необязательно)</label><input type="number" step="0.001" name="weight"></div>
           <div class="field" style="flex:2;"><label>Комментарий</label><input type="text" name="comment" placeholder="напр. рассадка по размеру"></div>
         </div>
-        <button class="btn" type="submit">Добавить пересадку</button>
+        <div id="saleFields" hidden>
+          <div class="field"><label for="saleKg">Общий вес проданной рыбы, кг</label><input id="saleKg" name="saleKg" type="number" min="0.001" step="0.001" disabled></div>
+          <div class="hint" style="margin-bottom:12px;">Списывается себестоимость проданного веса. Биомасса до продажи определяется по численности и последней навеске бассейна. Отход вносите в «Отход» или «ЧП».</div>
+        </div>
+        <button class="btn" type="submit" id="transferSubmit">Добавить пересадку</button>
       </form>
     </div>
   </div>
   <div class="panel">
     <div class="panel-head"><h2>История пересадок</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${rows.length} записей</span>${exportButton("transfers")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th><th>Откуда</th><th>Куда</th><th>Кол-во, шт.</th><th>Навеска, кг</th><th>Комментарий</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th><th>Откуда</th><th>Куда</th><th>Кол-во, шт.</th><th>Навеска, кг</th><th>Вес продажи, кг</th><th>Комментарий</th><th></th></tr></thead>
       <tbody>${rows.length? rows.map(([id,r])=>`
         <tr>
           <td>${fmtD(r.date)}</td><td>${poolLabel(r.from)}</td><td>${toPoolLabel(r.to)}</td>
           <td class="num">${fmtN(r.count)}</td>
           <td class="num">${r.weight?fmtN(r.weight,3):"—"}</td>
+          <td class="num">${r.to===OUT ? (()=>{ const w=econSaleWeight(r); return w.kg!==null ? fmtN(w.kg,3)+(w.estimated?' <span class="hint">расч.</span>':'') : "—"; })() : "—"}</td>
           <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
           <td><button class="btn danger" data-del="transfers:${esc(id)}">удалить</button></td>
-        </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Пока нет пересадок</td></tr>`}
+        </tr>`).join("") : `<tr class="empty-row"><td colspan="8">Пока нет пересадок</td></tr>`}
       </tbody></table>
     </div>
   </div>`;
@@ -2180,7 +2185,7 @@ function renderHelp(){
     <p>Раньше каждый день в Excel вручную протягивали формулы, переносили цифры между листами «Отход», «Кормление», «О2» и пересчитывали «Сводку» и «Инфографику». Здесь всё это делает программа сама.</p>
     <h3>Как вносить данные</h3>
     <p>1. Один раз занесите партии рыбы в разделе <b>«Зарыбление»</b> — дата, бассейн, навеска, количество.</p>
-    <p>2. Когда рыбу переносят между бассейнами (по размеру, при сортировке) или продают — используйте раздел <b>«Пересадки»</b>: откуда, куда (или «Продажа/выбытие»), сколько штук. Остаток в обоих бассейнах пересчитывается сам.</p>
+    <p>2. Когда рыбу переносят между бассейнами или продают — используйте раздел <b>«Пересадки»</b>: откуда, куда (или <b>«Продажа»</b>), сколько штук. Для продажи также укажите общий вес в килограммах. Проданная рыба выходит из учёта участка; её себестоимость списывается по доле проданного веса в биомассе перед продажей. Для старых записей без общего веса используются количество и указанная навеска, а при её отсутствии — последняя навеска бассейна. Погибшую рыбу вносите в «Отход» или «ЧП»: её затраты остаются на живой рыбе бассейна; при полном опустошении остаток затрат показывается отдельно.</p>
     <p>3. Каждый день заполняйте разделы <b>«Отход»</b>, <b>«Кормление»</b>, <b>«О2»</b> (по замерам в течение дня) и <b>«Температура»</b> — просто впишите цифры по бассейнам и нажмите «Сохранить». Повторное сохранение на ту же дату обновляет запись.</p>
     <p>4. Раздел <b>«Обработки»</b> — фиксируйте препараты и дозировки по бассейнам.</p>
     <p>5. Раздел <b>«ЧП»</b> — для происшествий, из-за которых погибла рыба (авария, отключение электричества, замор и т.п.), отдельно от обычного ежедневного отхода. Укажите дату, бассейн, сколько погибло и опишите, что случилось. Это число сразу прибавляется к обычному отходу и автоматически учитывается в остатке стада, на дашборде, в сводке и на графиках — вносить его повторно в «Отход» не нужно.</p>
@@ -2188,7 +2193,7 @@ function renderHelp(){
     <p>7. Раздел <b>«Корма и нормы»</b> — справочник кормов производителей: таблица норм кормления (% от массы рыбы в сутки по навескам и температуре), ожидаемый кормовой коэффициент и цены по датам. Новый корм добавляется вставкой таблицы из Excel; новая цена — одной строкой «с даты». Старые цены остаются: по ним пересчитывается себестоимость прошлых дней.</p>
     <p>8. В <b>«Кормлении»</b> в поле <b>«Расход корма (чистый), кг»</b> вносите сразу чистый расход. Возврат указывайте отдельно: он сохраняется в журнале и выгрузке, но не вычитается из расхода повторно. Например, при расходе 100 кг и возврате 10 кг в расчётах используются 100 кг. Под полями показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение внесённого чистого расхода от неё. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
     <p>9. <b>«Расчёт роста»</b> — план выращивания по бассейну или по всему участку : привес = навеска × норма корма ÷ кормовой коэффициент, отход — фактический процент хозяйства (или заданный вручную), температуры — по журналу «Температура». План фиксирует нормы и цены на момент создания; сравнение с фактом — по кормлению, взвешиваниям, численности, затратам и себестоимости 1 кг.</p>
-    <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (стоимость партии при зарыблении), корм (внесённый чистый расход × цена выбранного корма на дату кормления), кислород (тот же чистый расход × кг О2 на 1 кг корма × цена кислорода), прочие затраты. Возврат корма в этих формулах повторно не вычитается. При пересадке затраты переходят вместе с рыбой, при продаже списываются. Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним внесённым навескам.</p>
+    <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (стоимость партии при зарыблении), корм (внесённый чистый расход × цена выбранного корма на дату кормления), кислород (тот же чистый расход × кг О2 на 1 кг корма × цена кислорода), прочие затраты. Возврат корма повторно не вычитается. При пересадке затраты переходят вместе с рыбой, при продаже списываются по весу. Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним навескам. Выберите <b>«Себестоимость на дату»</b>: таблица всех бассейнов и накопленные списания покажут состояние на конец этого дня. В <b>«Истории себестоимости»</b> выберите начало периода и отдельный бассейн либо все бассейны участка. При исправлении исходных записей история пересчитывается. Пустые бассейны остаются видны с нулевым остатком, а руб/кг для них не рассчитываются.</p>
     <h3>Что считается автоматически</h3>
     <p>— Остаток стада по каждому бассейну (зарыбление плюс пересадки минус накопленный отход, включая отход по ЧП) — отдельным разделом <b>«Численность стада»</b> с историей по дням, по аналогии с «Отходом».<br>
     — Итоги по кормлению и отходу за день (журнал «Отход» + «ЧП» вместе).<br>
@@ -2319,18 +2324,35 @@ function wireActiveSection(){
   });
 
   const transferForm = document.getElementById("transferForm");
+  if(transferForm){
+    const updateSaleFields = ()=>{
+      const sale = transferForm.elements.to.value === OUT;
+      document.getElementById("saleFields").hidden = !sale;
+      transferForm.elements.saleKg.disabled = !sale;
+      transferForm.elements.saleKg.required = sale;
+      document.getElementById("transferSubmit").textContent = sale ? "Добавить продажу" : "Добавить пересадку";
+    };
+    transferForm.elements.to.addEventListener("change", updateSaleFields);
+    updateSaleFields();
+  }
   if(transferForm) transferForm.addEventListener("submit", async e=>{
     e.preventDefault();
     const f = new FormData(transferForm);
     const from = f.get("from"), to = f.get("to");
     if(from === to){ toast("«Из» и «в» не могут совпадать"); return; }
+    if(!(Number(f.get("count")) > 0)){ toast("Укажите количество рыбы больше нуля"); return; }
+    if(to === OUT && !(Number(f.get("saleKg")) > 0)){ toast("Укажите общий вес проданной рыбы в килограммах"); return; }
+    if(to === OUT && !econLastWeight(from, f.get("date"))){ toast("Сначала внесите навеску исходного бассейна на дату продажи или раньше — она нужна для списания себестоимости"); return; }
     await Store.addDoc(pcol("transfers"), {
       date: f.get("date"), from, to, count: Number(f.get("count")),
       weight: f.get("weight")? Number(f.get("weight")) : null,
+      saleKg: to === OUT ? Number(f.get("saleKg")) : null,
+      createdAt: Date.now(),
       comment: f.get("comment")||""
     });
     transferForm.reset();
-    toast("Пересадка добавлена");
+    transferForm.elements.to.dispatchEvent(new Event("change"));
+    toast(to === OUT ? "Продажа добавлена" : "Пересадка добавлена");
   });
 
   const incidentForm = document.getElementById("incidentForm");
@@ -2957,9 +2979,15 @@ function econNorm(pool, date, kind){
 
 // Главный расчёт фактической себестоимости. Затраты «прикреплены» к рыбе
 // в бассейне: малёк + корм + кислород + прочие. При пересадке переносится
-// доля затрат пропорционально числу рыб; при продаже/выбытии доля
-// списывается в себестоимость реализованного; если бассейн опустел,
+// доля затрат пропорционально числу рыб; при продаже — проданному весу.
+// Если бассейн опустел,
 // оставшиеся затраты списываются как потери.
+function econSaleWeight(t, averageKg){
+  if(num(t.saleKg) > 0) return { kg:num(t.saleKg), estimated:false };
+  const lw = averageKg === undefined ? econLastWeight(t.from, t.date) : null;
+  const w = num(t.weight) > 0 ? num(t.weight) : (averageKg === undefined ? (lw ? lw.kg : 0) : averageKg);
+  return { kg:w > 0 ? num(t.count)*w : null, estimated:true };
+}
 function econLedger(){
   return econCached("ledger", ()=>{
     const P = econPopIndex();
@@ -2976,10 +3004,12 @@ function econLedger(){
     expenses.forEach(e=>{ (expByDate[e.date] = expByDate[e.date] || []).push(e); });
     const run = {}; POOLS.forEach(p=> run[p] = zero());
     const sold = zero(), lost = zero(), unallocated = zero();
-    const snap = {}, daily = {};
-    const issues = { noPrice:{}, noFryPrice:[], autoKind:0, noWeight:{} };
+    const soldByPool = {}, lostByPool = {};
+    POOLS.forEach(p=>{ soldByPool[p] = 0; lostByPool[p] = 0; });
+    const snap = {}, daily = {}, disposalSnap = {}, movements = [];
+    const issues = { noPrice:{}, noFryPrice:[], autoKind:0, noWeight:{}, sales:[] };
     dates.forEach(date=>{
-      const day = {}; POOLS.forEach(p=> day[p] = { feedKg:0, fry:0, feed:0, o2:0, other:0, kind:null, price:null, auto:false });
+      const day = {}; POOLS.forEach(p=> day[p] = { feedKg:0, fry:0, feed:0, o2:0, other:0, kind:null, price:null, auto:false, soldKg:0, soldCost:0, lostCost:0 });
       (stockByDate[date]||[]).forEach(s=>{
         if(!run[s.pool]) return;
         let cost = 0;
@@ -3022,28 +3052,70 @@ function econLedger(){
         if(!(tot > 0)){ unallocated.other += amt; return; }
         Object.keys(w).forEach(p=>{ const part = amt * w[p]/tot; run[p].other += part; day[p].other += part; });
       });
-      (trByDate[date]||[]).forEach(t=>{
+      const transfers = (trByDate[date]||[]).slice().sort((a,b)=>num(a.createdAt)-num(b.createdAt));
+      // Восстанавливаем численность перед всеми пересадками дня из его
+      // фактического остатка, затем изменяем её после каждой операции.
+      const counts = {}, biomass = {};
+      POOLS.forEach(p=> counts[p] = econPopAt(p, date));
+      transfers.forEach(t=>{
+        if(counts[t.from] !== undefined) counts[t.from] += num(t.count);
+        if(counts[t.to] !== undefined) counts[t.to] -= num(t.count);
+      });
+      POOLS.forEach(p=>{
+        counts[p] = Math.max(0, counts[p]);
+        const weights = (econWeightIndex()[p]||[]).filter(w=>w.date<=date && !(w.date===date && w.src==="пересадка"));
+        const w = weights.length ? weights[weights.length-1] : null;
+        biomass[p] = w ? counts[p]*w.kg : null;
+        if(counts[p]===0) biomass[p] = 0;
+      });
+      transfers.forEach(t=>{
         if(!run[t.from]) return;
-        const c = num(t.count);
-        const after = num(P.byDate[date] && P.byDate[date][t.from]);
-        const before = after + c;
-        const share = before > 0 ? Math.min(1, c/before) : 0;
+        if(t.to !== OUT && !run[t.to]) return;
+        const c = Math.max(0, num(t.count));
+        const before = counts[t.from];
+        const isSale = t.to === OUT;
+        const avg = before > 0 && biomass[t.from] !== null ? biomass[t.from]/before : 0;
+        const saleWeight = isSale ? econSaleWeight(t, avg) : null;
+        let share = before > 0 ? Math.min(1, c/before) : 0;
+        let movedKg = avg > 0 ? c*avg : (num(t.weight)>0 ? c*num(t.weight) : null);
+        if(isSale){
+          movedKg = saleWeight.kg;
+          if(c >= before && before > 0) share = 1;
+          else if(movedKg !== null && biomass[t.from] > 0) share = Math.min(1, movedKg/biomass[t.from]);
+          else { share = 0; issues.sales.push({date,pool:t.from,text:"нет навески для списания себестоимости продажи"}); }
+          if(movedKg !== null && biomass[t.from] !== null && movedKg > biomass[t.from]+0.001) issues.sales.push({date,pool:t.from,text:"вес продажи больше расчётной биомассы — проверьте навеску"});
+          day[t.from].soldKg += movedKg || 0;
+        }
+        let movedCost = 0;
         cats.forEach(cat=>{
           const moved = run[t.from][cat] * share;
+          movedCost += moved;
           run[t.from][cat] -= moved;
-          if(run[t.to]) run[t.to][cat] += moved; else sold[cat] += moved;
+          if(run[t.to]) run[t.to][cat] += moved; else if(isSale) sold[cat] += moved;
         });
+        counts[t.from] = Math.max(0, before-c);
+        if(biomass[t.from] !== null && movedKg !== null) biomass[t.from] = Math.max(0, biomass[t.from]-movedKg);
+        if(run[t.to]){
+          counts[t.to] += c;
+          biomass[t.to] = biomass[t.to] !== null && movedKg !== null ? biomass[t.to]+movedKg : null;
+        }
+        if(isSale){ soldByPool[t.from] += movedCost; day[t.from].soldCost += movedCost; }
+        movements.push({date,from:t.from,to:t.to,count:c,kg:movedKg,cost:movedCost,estimated:isSale && saleWeight.estimated});
       });
       POOLS.forEach(p=>{
         const n = num(P.byDate[date] && P.byDate[date][p]);
         const tot = cats.reduce((s,c)=> s + run[p][c], 0);
-        if(!(n > 0) && tot > 0 && P.byDate[date]){ cats.forEach(c=>{ lost[c] += run[p][c]; run[p][c] = 0; }); }
+        if(!(n > 0) && tot > 0 && P.byDate[date]){
+          lostByPool[p] += tot; day[p].lostCost += tot;
+          cats.forEach(c=>{ lost[c] += run[p][c]; run[p][c] = 0; });
+        }
       });
       const sn = {}; POOLS.forEach(p=> sn[p] = {...run[p]});
       snap[date] = sn;
       daily[date] = day;
+      disposalSnap[date] = { soldByPool:{...soldByPool}, lostByPool:{...lostByPool}, unallocated:{...unallocated} };
     });
-    return { dates, snap, daily, sold, lost, unallocated, issues };
+    return { dates, snap, daily, sold, lost, unallocated, issues, disposalSnap, movements };
   });
 }
 function econCostAt(pool, date){
@@ -3055,6 +3127,32 @@ function econCostAt(pool, date){
   const res = c ? {...c} : z;
   res.total = res.fry + res.feed + res.o2 + res.other;
   return res;
+}
+function econDisposalsAt(pools, date){
+  const L = econLedger();
+  const d = L.dates.filter(d=>d<=date).pop();
+  const snap = d && L.disposalSnap[d];
+  return {
+    sold: snap ? pools.reduce((s,p)=>s+num(snap.soldByPool[p]),0) : 0,
+    lost: snap ? pools.reduce((s,p)=>s+num(snap.lostByPool[p]),0) : 0,
+    unallocated: snap ? num(snap.unallocated.other) : 0
+  };
+}
+function econCostHistory(pools, from, to){
+  const L = econLedger();
+  if(!to || (from && from>to)) return [];
+  const dates = new Set(L.dates.filter(d=>(!from || d>=from) && d<=to));
+  if(from) dates.add(from);
+  dates.add(to);
+  return [...dates].sort().map(date=>{
+    const st = econFactState(pools,date);
+    const disposals = econDisposalsAt(pools,date);
+    const day = L.daily[date] || {};
+    return {date,...st,...disposals,
+      soldKg:pools.reduce((s,p)=>s+num(day[p] && day[p].soldKg),0),
+      soldCost:pools.reduce((s,p)=>s+num(day[p] && day[p].soldCost),0),
+      lostCost:pools.reduce((s,p)=>s+num(day[p] && day[p].lostCost),0)};
+  });
 }
 // Состояние бассейна/участка на дату по факту.
 function econFactState(pools, date){
@@ -3536,12 +3634,35 @@ function drawPlanCharts(retries){
 }
 
 /* ---------- интерфейс: «Себестоимость» (факт) ---------- */
+function costHistorySelection(at){
+  const from = renderCost._historyFrom && renderCost._historyFrom <= at ? renderCost._historyFrom : at.slice(0,8)+"01";
+  const pool = POOLS.includes(renderCost._historyPool) ? renderCost._historyPool : "";
+  return {from,pool,pools:pool ? [pool] : POOLS.slice()};
+}
+function renderCostHistory(at){
+  const sel = costHistorySelection(at);
+  const history = econCostHistory(sel.pools,sel.from,at).reverse();
+  return `<div class="panel" id="costHistoryPanel">
+    <div class="panel-head"><h2>История себестоимости</h2><span class="hint">${sel.pool ? "бассейн "+poolLabel(sel.pool) : "все бассейны участка"} · по ${fmtD(at)} включительно</span></div>
+    <div class="panel-body">
+      <form id="costHistoryForm" class="row" style="align-items:flex-end;">
+        <div class="field"><label for="costHistoryPool">Бассейн</label><select id="costHistoryPool" name="pool"><option value="">Все бассейны участка</option>${POOLS.map(p=>`<option value="${esc(p)}" ${sel.pool===p?"selected":""}>${poolLabel(p)}</option>`).join("")}</select></div>
+        <div class="field"><label for="costHistoryFrom">Начало истории</label><input id="costHistoryFrom" type="date" name="from" value="${esc(sel.from)}" max="${esc(at)}" required></div>
+        <button class="btn" type="submit">Показать историю</button>
+      </form>
+      <div class="hint" style="margin:12px 0;">Остаток затрат на конец каждого дня с записями, а также на границы выбранного периода. Конечная дата задаётся сверху в поле «Себестоимость на дату». Общая себестоимость 1 кг = затраты всех бассейнов ÷ общая биомасса. История пересчитывается при исправлении журналов и цен.</div>
+      <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Себестоимость, руб/кг</th><th>Остаток затрат, руб</th><th>Рыба, шт.</th><th>Биомасса, кг</th><th>Продано за день, кг</th><th>Списано при продаже за день, руб</th><th>Списано по пустым бассейнам за день, руб</th></tr></thead><tbody>
+      ${history.map(r=>`<tr><td>${fmtD(r.date)}</td><td class="num"><b>${r.measured && r.costPerKg!==null?fmtN(r.costPerKg,2):"—"}</b></td><td class="num"><b>${fmtN(r.cost,2)}</b></td><td class="num">${fmtN(r.n)}</td><td class="num">${r.measured?fmtN(r.biomass,1):"—"}</td><td class="num">${fmtN(r.soldKg,3)}</td><td class="num">${fmtN(r.soldCost,2)}</td><td class="num">${fmtN(r.lostCost,2)}</td></tr>`).join("")}
+      </tbody></table></div>
+    </div></div>`;
+}
 function renderCost(){
   const L = econLedger();
   const lastDate = L.dates.length ? L.dates[L.dates.length-1] : todayISO();
   const at = renderCost._at || lastDate;
   const from = renderCost._from || (at.slice(0,8) + "01");
   const to = renderCost._to || at;
+  const disposals = econDisposalsAt(POOLS,at);
   const rows = POOLS.map(p=>{
     const c = econCostAt(p, at);
     const n = econPopAt(p, at);
@@ -3566,6 +3687,7 @@ function renderCost(){
   noPriceKeys.forEach(k=> alerts.push(`<div class="alert warn">Нет цены для «${esc(k)}» на дату кормления — ${fmtN(issues.noPrice[k],1)} кг корма учтены по нулевой цене. Добавьте цену в «Корма и нормы» с более ранней датой.</div>`));
   if(issues.noFryPrice.length) alerts.push(`<div class="alert warn">У ${issues.noFryPrice.length} записей зарыбления не указана цена малька — их стоимость не учтена. Укажите цену в разделе «Зарыбление».</div>`);
   if(issues.autoKind) alerts.push(`<div class="alert good">В ${fmtN(issues.autoKind)} записях кормления (бассейн × день) корм не выбран вручную — взят корм по навеске из справочника.</div>`);
+  issues.sales.filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}, ${poolLabel(x.pool)}: ${esc(x.text)}.</div>`));
   const expenses = Object.entries(state.expenses||{}).map(([id,e])=>({...e,id})).sort((a,b)=> (b.date||"").localeCompare(a.date||""));
   return `
   ${topbar("Себестоимость", "Фактические затраты на стадо по журналам: малёк, корм, кислород, прочие затраты", exportButton("cost","Выгрузить в Excel"))}
@@ -3585,12 +3707,13 @@ function renderCost(){
   <div class="panel">
     <div class="panel-head"><h2>Себестоимость по бассейнам на ${fmtD(at)}</h2><span class="hint">затраты переходят вместе с рыбой при пересадках</span></div>
     <div class="panel-body table-wrap"><table><thead><tr><th>Бассейн</th><th>Остаток, шт.</th><th>Навеска, кг</th><th>Биомасса, кг</th><th>Малёк</th><th>Корм</th><th>Кислород</th><th>Прочие</th><th>Итого, руб</th><th>Руб/кг</th></tr></thead><tbody>
-      ${rows.filter(r=> r.n > 0 || Math.abs(r.c.total) > 0.5).map(r=>`<tr><td>${poolLabel(r.p)}</td><td class="num">${fmtN(r.n)}</td><td class="num">${r.lw?fmtN(r.lw.kg,3)+` <span class="hint">${fmtD(r.lw.date)}</span>`:"—"}</td><td class="num">${fmtN(r.biomass,0)}</td>
+      ${rows.map(r=>`<tr><td>${poolLabel(r.p)}${r.n>0?'':' <span class="hint">нет рыбы</span>'}</td><td class="num">${fmtN(r.n)}</td><td class="num">${r.lw?fmtN(r.lw.kg,3)+` <span class="hint">${fmtD(r.lw.date)}</span>`:"—"}</td><td class="num">${fmtN(r.biomass,0)}</td>
         <td class="num">${fmtN(r.c.fry,0)}</td><td class="num">${fmtN(r.c.feed,0)}</td><td class="num">${fmtN(r.c.o2,0)}</td><td class="num">${fmtN(r.c.other,0)}</td><td class="num"><b>${fmtN(r.c.total,0)}</b></td><td class="num"><b>${r.perKg!==null?fmtN(r.perKg,1):"—"}</b></td></tr>`).join("")}
       <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(tot.n)}</td><td></td><td class="num">${fmtN(tot.biomass,0)}</td><td class="num">${fmtN(tot.fry,0)}</td><td class="num">${fmtN(tot.feed,0)}</td><td class="num">${fmtN(tot.o2,0)}</td><td class="num">${fmtN(tot.other,0)}</td><td class="num">${fmtN(tot.total,0)}</td><td class="num">${tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}</td></tr>
     </tbody></table>
-    <div class="hint" style="margin-top:8px;">Списано в себестоимость проданной/выбывшей рыбы: ${fmtN(L.sold.fry+L.sold.feed+L.sold.o2+L.sold.other,0)} руб · списано по опустевшим бассейнам: ${fmtN(L.lost.fry+L.lost.feed+L.lost.o2+L.lost.other,0)} руб${L.unallocated.other?` · прочие затраты без рыбы на участке: ${fmtN(L.unallocated.other,0)} руб`:""}.</div></div>
+    <div class="hint" style="margin-top:8px;">Накоплено по ${fmtD(at)} включительно: себестоимость проданной рыбы — ${fmtN(disposals.sold,2)} руб · списано по опустевшим бассейнам — ${fmtN(disposals.lost,2)} руб${disposals.unallocated?` · прочие затраты без рыбы на участке — ${fmtN(disposals.unallocated,2)} руб`:""}.</div></div>
   </div>
+  ${renderCostHistory(at)}
   <div class="panel">
     <div class="panel-head"><h2>Факт против плана на ${fmtD(at)}</h2></div>
     <div class="panel-body table-wrap">${planDev.length ? `<table><thead><tr><th>План</th><th>Что</th><th>Себест. план, руб/кг</th><th>Себест. факт, руб/кг</th><th>Откл.</th><th>Затраты план, руб</th><th>Затраты факт, руб</th><th>Откл.</th><th>Корм план, кг</th><th>Корм факт, кг</th><th>Откл.</th></tr></thead><tbody>
@@ -3606,7 +3729,7 @@ function renderCost(){
         <button class="btn" type="submit">Рассчитать</button>
       </form>
       <div class="table-wrap" style="margin-top:12px;"><table><thead><tr><th>Бассейн</th><th>Корм, кг</th><th>Малёк</th><th>Корм, руб</th><th>Кислород</th><th>Прочие</th><th>Итого, руб</th></tr></thead><tbody>
-        ${incByPool.filter(r=> r.total > 0.5 || r.feedKg > 0).map(r=>`<tr><td>${poolLabel(r.p)}</td><td class="num">${fmtN(r.feedKg,1)}</td><td class="num">${fmtN(r.fry,0)}</td><td class="num">${fmtN(r.feed,0)}</td><td class="num">${fmtN(r.o2,0)}</td><td class="num">${fmtN(r.other,0)}</td><td class="num">${fmtN(r.total,0)}</td></tr>`).join("")}
+        ${incByPool.map(r=>`<tr><td>${poolLabel(r.p)}</td><td class="num">${fmtN(r.feedKg,1)}</td><td class="num">${fmtN(r.fry,0)}</td><td class="num">${fmtN(r.feed,0)}</td><td class="num">${fmtN(r.o2,0)}</td><td class="num">${fmtN(r.other,0)}</td><td class="num">${fmtN(r.total,0)}</td></tr>`).join("")}
         <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(inc.feedKg,1)}</td><td class="num">${fmtN(inc.fry,0)}</td><td class="num">${fmtN(inc.feed,0)}</td><td class="num">${fmtN(inc.o2,0)}</td><td class="num">${fmtN(inc.other,0)}</td><td class="num">${fmtN(inc.total,0)}</td></tr>
       </tbody></table></div>
     </div>
@@ -3634,10 +3757,7 @@ function renderCost(){
 /* ---------- блок норм в «Кормлении» ---------- */
 function renderFeedNormBlock(date, existing){
   const opts = econKindOptions(true);
-  if(!opts.length) return `<div class="alert warn" style="margin-bottom:12px;">Чтобы видеть норму и отклонения, заполните раздел «Корма и нормы».</div>`;
-  // бассейны без рыбы и без внесённого корма не показываем
-  const shown = POOLS.filter(p=> econPopAt(p, date) > 0 || num(existing && existing.used && existing.used[p]) > 0);
-  if(!shown.length) return `<div class="hint" style="margin-bottom:12px;">На ${fmtD(date)} в учёте нет рыбы — норма не считается.</div>`;
+  const shown = POOLS;
   const rows = shown.map(p=>{
     const saved = existing && existing.kinds && existing.kinds[p];
     const def = econDefaultKind(p, date);
@@ -3646,20 +3766,20 @@ function renderFeedNormBlock(date, existing){
     const known = new Set(opts.map(o=>o.value));
     const extra = kind && !known.has(kind) ? [{ value:kind, label: econKindLabel(kind) }] : [];
     return `<tr data-norm-row="${esc(p)}" data-norm-kg="${nm ? nm.kg : ""}">
-      <td>${poolLabel(p)}</td>
+      <td>${poolLabel(p)}${econPopAt(p,date)>0?'':' <span class="hint">нет рыбы</span>'}</td>
       <td style="text-align:left;"><select name="k_${esc(p)}" data-kind-pool="${esc(p)}" style="min-width:210px;">
         <option value="">${def ? "по навеске: "+esc(econKindLabel(def)) : "— не выбран —"}</option>
         ${extra.concat(opts).map(o=>`<option value="${esc(o.value)}" ${saved===o.value?"selected":""}>${esc(o.label)}</option>`).join("")}
       </select></td>
       <td class="num">${nm ? fmtN(nm.wG, nm.wG<10?2:0)+` <span class="hint" title="последний замер ${fmtDRaw(nm.pw.measuredDate)}: ${fmtN(nm.pw.measuredKg*1000, 1)} г (${nm.pw.src})">${nm.pw.days?"расч.":"замер"}</span>` : "—"}</td>
-      <td class="num">${nm ? fmtN(nm.n) : "—"}</td>
+      <td class="num">${fmtN(econPopAt(p,date))}</td>
       <td class="num">${nm ? fmtN(nm.T,1)+"°" : "—"}</td>
       <td class="num" data-norm-cell="${esc(p)}">${nm ? (nm.fasting ? '0 <span class="hint">разгр.</span>' : fmtN(nm.kg,1)) : "—"}</td>
       <td class="num" data-fact-cell="${esc(p)}">—</td>
       <td data-dev-cell="${esc(p)}"></td>
     </tr>`;
   }).join("");
-  return `<label style="margin-top:4px;">Корм и норма по бассейнам на ${fmtD(date)}</label>
+  return `${!opts.length?'<div class="alert warn" style="margin-bottom:12px;">Чтобы видеть норму и отклонения, заполните раздел «Корма и нормы».</div>':''}<label style="margin-top:4px;">Корм и норма по бассейнам на ${fmtD(date)}</label>
     <div class="table-wrap" style="margin-bottom:12px;"><table><thead><tr><th>Бассейн</th><th style="text-align:left;">Корм · фракция</th><th>Навеска, г</th><th>Остаток, шт.</th><th>t воды</th><th>Норма, кг</th><th>Чистый факт, кг</th><th>Откл. от нормы</th></tr></thead>
     <tbody>${rows}</tbody>
     <tfoot><tr style="font-weight:600;"><td>Итого</td><td></td><td></td><td></td><td></td><td class="num" id="normTotal">—</td><td class="num" id="factTotal">—</td><td id="devTotal"></td></tr></tfoot></table></div>`;
@@ -3862,6 +3982,16 @@ function wireEcon(main){
   // --- себестоимость
   const costAtForm = document.getElementById("costAtForm");
   if(costAtForm) costAtForm.addEventListener("submit", e=>{ e.preventDefault(); renderCost._at = new FormData(costAtForm).get("at") || ""; renderActive(); });
+  const costHistoryForm = document.getElementById("costHistoryForm");
+  if(costHistoryForm) costHistoryForm.addEventListener("submit", e=>{
+    e.preventDefault();
+    const f = new FormData(costHistoryForm);
+    const at = costAtForm.elements.at.value;
+    if(f.get("from") > at){ toast("Начало истории должно быть не позже выбранной даты себестоимости"); return; }
+    renderCost._historyFrom = f.get("from"); renderCost._historyPool = f.get("pool");
+    renderActive();
+    document.getElementById("costHistoryPanel").scrollIntoView({block:"start"});
+  });
   const costPeriodForm = document.getElementById("costPeriodForm");
   if(costPeriodForm) costPeriodForm.addEventListener("submit", e=>{
     e.preventDefault();
@@ -3920,14 +4050,23 @@ function buildWorkbook_cost(){
     aoa.push([poolLabelRaw(p), Math.round(n), lw?lw.kg:"", r2(b), r2(c.fry), r2(c.feed), r2(c.o2), r2(c.other), r2(c.total), b>0?r2(c.total/b):""]);
   });
   const daily = [["Дата","Бассейн","Корм","Цена, руб/кг","Корм, кг","Корм, руб","Кислород, руб","Прочие, руб","Малёк, руб"]];
-  L.dates.forEach(d=> POOLS.forEach(p=>{
+  L.dates.filter(d=>d<=at).forEach(d=> POOLS.forEach(p=>{
     const x = L.daily[d][p];
     if(!x || !(x.feedKg || x.other || x.fry)) return;
     daily.push([fmtDRaw(d), poolLabelRaw(p), x.kind?econKindLabel(x.kind)+(x.auto?" (по навеске)":""):"", x.price===null?"":x.price, r2(x.feedKg), r2(x.feed), r2(x.o2), r2(x.other), r2(x.fry)]);
   }));
+  const totals = econFactState(POOLS,at);
+  aoa.push(["Итого",totals.n,"",totals.measured?r2(totals.biomass):"",r2(totals.parts.fry),r2(totals.parts.feed),r2(totals.parts.o2),r2(totals.parts.other),r2(totals.cost),totals.measured && totals.costPerKg!==null?r2(totals.costPerKg):""]);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Себестоимость "+fmtDRaw(at).replace(/\./g,"-"));
   XLSX.utils.book_append_sheet(wb, aoaSheet(daily), "Затраты по дням");
+  const sel = costHistorySelection(at);
+  const history = [["Дата","Бассейн","Рыба, шт.","Биомасса, кг","Малёк, руб","Корм, руб","Кислород, руб","Прочие, руб","Остаток затрат, руб","Руб/кг","Продано за день, кг","Списано при продаже за день, руб","Списано по пустым бассейнам за день, руб"]];
+  econCostHistory(sel.pools,sel.from,at).forEach(r=>history.push([fmtDRaw(r.date),sel.pool?poolLabelRaw(sel.pool):"Все бассейны участка",r.n,r.measured?r2(r.biomass):"",r2(r.parts.fry),r2(r.parts.feed),r2(r.parts.o2),r2(r.parts.other),r2(r.cost),r.measured && r.costPerKg!==null?r2(r.costPerKg):"",r2(r.soldKg),r2(r.soldCost),r2(r.lostCost)]));
+  XLSX.utils.book_append_sheet(wb,aoaSheet(history),"История себестоимости");
+  const sales = [["Дата","Бассейн","Количество, шт.","Проданный вес, кг","Вес рассчитан по навеске","Списанная себестоимость, руб"]];
+  L.movements.filter(t=>t.to===OUT && t.date<=at).forEach(t=>sales.push([fmtDRaw(t.date),poolLabelRaw(t.from),t.count,t.kg===null?"":r2(t.kg),t.estimated?"да":"нет",r2(t.cost)]));
+  XLSX.utils.book_append_sheet(wb,aoaSheet(sales),"Продажи и списания");
   return { wb, filename:"Себестоимость.xlsx" };
 }
 
@@ -3947,8 +4086,8 @@ function buildWorkbook_stocking(){
 
 function buildWorkbook_transfers(){
   const rows = Object.values(state.transfers).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const aoa = [["Дата","Из бассейна","В бассейн","Количество, шт.","Навеска, кг","Комментарий"]];
-  rows.forEach(r=> aoa.push([fmtDRaw(r.date), poolLabelRaw(r.from), toPoolLabelRaw(r.to), num(r.count), r.weight||"", r.comment||""]));
+  const aoa = [["Дата","Из бассейна","В бассейн / продажа","Количество, шт.","Навеска, кг","Вес продажи, кг","Вес рассчитан по навеске","Комментарий"]];
+  rows.forEach(r=>{ const w=r.to===OUT?econSaleWeight(r):null; aoa.push([fmtDRaw(r.date), poolLabelRaw(r.from), toPoolLabelRaw(r.to), num(r.count), r.weight||"", w && w.kg!==null?w.kg:"",w?(w.estimated?"да":"нет"):"", r.comment||""]); });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, aoaSheet(aoa), "Пересадки");
   return { wb, filename:"Пересадки.xlsx" };
