@@ -464,7 +464,7 @@ const state = {
 let renderQueued = false;
 function scheduleRender(){
   econVersion++; // данные изменились — кэш расчётов экономики устарел
-  if(farmImportBusy || renderQueued) return;
+  if(farmImportBusy || f3PricesBusy || renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(()=>{ renderQueued=false; renderActive(); });
 }
@@ -3095,10 +3095,13 @@ function econParseKind(v){
   if(i < 0) return null;
   return { feedId: v.slice(0,i), fraction: Number(v.slice(i+1)) };
 }
+function econCompositionLabel(feed,fraction){
+  const c=feed?.composition?.[fraction];return c ? " · жир "+fmtN(c.fat,0)+"% · аст. "+fmtN(c.astaxanthin,0)+" мг/кг" : "";
+}
 function econKindLabel(v){
   const k = econParseKind(v); if(!k) return "—";
   const f = state.feeds[k.feedId];
-  return (f ? f.name : "удалённый корм") + " · " + fmtN(k.fraction, 1) + " мм";
+  return (f ? f.name : "удалённый корм") + " · " + fmtN(k.fraction, 1) + " мм" + econCompositionLabel(f,k.fraction);
 }
 // Все варианты «корм · фракция» для выбора при вводе кормления.
 function econKindOptions(includeInactive){
@@ -3108,7 +3111,7 @@ function econKindOptions(includeInactive){
     econFeedRows(f).forEach(r=>{
       const fr = Number(r.fraction);
       if(seen.has(fr)) return; seen.add(fr);
-      list.push({ value: econKindValue(f.id, fr), label: `${f.name} · ${fmtN(fr,1)} мм` });
+      list.push({ value: econKindValue(f.id, fr), label: `${f.name} · ${fmtN(fr,1)} мм${econCompositionLabel(f,fr)}` });
     });
   });
   return list;
@@ -3673,6 +3676,172 @@ function renderFeedCompare(feeds){
     </tbody></table></div></div>`;
 }
 
+// Прайсы, предоставленные владельцем 15.11.2026. Срок на исходных листах — 30.09.2026.
+// Справочные предложения отделены от датированной истории учётных цен.
+const F3_PRICE_NAMES = {
+  start:'F3 Стартовый', se:'F3 Среднеэнергетичный медленно тонущий',
+  ve:'F3 Высокоэнергетичный медленно тонущий', plus:'F3 Высокоэнергетичный+ медленно тонущий'
+};
+const F3_CHANNELS = {wholesale:'Ардон — опт', retail:'Ардон — розница', factory:'Завод — Нариманов'};
+let f3PricesBusy=false;
+const F3_PRICE_BOOKS = [
+  {id:'se',title:'СЭ — среднеэнергетичный',validUntil:'2026-09-30',rows:[
+    ['start15','start',1.5,54,16,30,350,356,358],['start20','start',2,52,17,30,345,351,353],
+    ['se30','se',3,47,18,0,258,264,266],['se45','se',4.5,45,21,30,249,255,257],
+    ['se60','se',6,43,22,50,245,251,253],['se80a50','se',8,42,24,50,250,256,258],
+    ['se80a80','se',8,42,24,80,253,259,261],['se100','se',10,42,24,80,253,259,261]
+  ]},
+  {id:'ve',title:'ВЭ — высокоэнергетичный',validUntil:'2026-09-30',rows:[
+    ['start15','start',1.5,54,16,30,350,354,369],['start20','start',2,52,17,30,345,349,364],
+    ['ve30','ve',3,43,24,0,260,264,279],['ve45','ve',4.5,42,25,30,251,255,270],
+    ['ve60','ve',6,41,26,50,249,253,268],['ve80','ve',8,40,27,80,256,260,275],
+    ['ve100','ve',10,40,27,80,256,260,275]
+  ]},
+  {id:'plus',title:'ВЭ+ — высокоэнергетичный+',validUntil:'2026-09-30',rows:[
+    ['start15','start',1.5,54,16,30,350,354,369],['start20','start',2,52,17,30,345,349,364],
+    ['plus30','plus',3,43,24,30,268,272,287],['plus45','plus',4.5,44,28,100,263,267,282],
+    ['plus60','plus',6,41,30,100,265,269,284],['plus80','plus',8,41,30,100,265,269,284],
+    ['plus100','plus',10,41,32,100,265,269,284]
+  ]}
+].map(b=>({...b,rows:b.rows.map(([id,type,fraction,protein,fat,astaxanthin,factory,wholesale,retail])=>
+  ({id,type,fraction,protein,fat,astaxanthin,factory,wholesale,retail}))}));
+function f3PriceBooks(){
+  const saved=state.settings.f3PriceBook;
+  return JSON.parse(JSON.stringify(saved?.books||F3_PRICE_BOOKS));
+}
+function f3ValidDate(value){
+  return /^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value+'T12:00:00Z'))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
+}
+function f3ValidateBook(book){
+  const original=F3_PRICE_BOOKS.find(b=>b.id===book.id);
+  if(!original||book.rows.length!==original.rows.length)throw Error('Неверный состав прайса');
+  for(const [i,row] of book.rows.entries()){
+    for(const key of ['id','type','fraction','protein','fat','astaxanthin'])if(row[key]!==original.rows[i][key])throw Error('Состав корма не совпадает с исходным прайсом');
+    for(const key of Object.keys(F3_CHANNELS))if(typeof row[key]!=='number'||!Number.isFinite(row[key])||row[key]<=0)throw Error('Все цены должны быть больше нуля');
+  }
+}
+function f3ReadBookForm(form,book){
+  const next=JSON.parse(JSON.stringify(book));
+  next.rows.forEach(r=>Object.keys(F3_CHANNELS).forEach(key=>{
+    const value=form.elements['f3_'+r.id+'_'+key]?.value;
+    if(value===undefined||!String(value).trim())throw Error('Заполните все цены');
+    r[key]=parseNum(value);
+  }));
+  f3ValidateBook(next);return next;
+}
+function f3BuildPricePlan(book,channel,date,includeStart,replaceSameDate,feeds){
+  f3ValidateBook(book);
+  if(!['wholesale','retail'].includes(channel))throw Error('Выберите опт или розницу Ардона');
+  if(!f3ValidDate(date))throw Error('Укажите корректную дату начала действия');
+  const updates=new Map();
+  for(const row of book.rows.filter(r=>includeStart||r.type!=='start')){
+    // Два СЭ 8 мм нельзя свести к одной цене; старый неуточнённый корм не переименовываем.
+    const special=row.type==='se'&&row.fraction===8 ? 'f3-se-8-astax-'+row.astaxanthin : row.id==='plus30' ? 'f3-plus-3-astax-30' : null;
+    let id=special||Object.keys(feeds).find(k=>feeds[k].name===F3_PRICE_NAMES[row.type]);
+    if(!id)id='f3-catalog-'+row.type;
+    const before=feeds[id]||null;
+    if(special&&before&&before.priceVariant!==special)throw Error('Конфликт отдельного варианта корма: '+id);
+    let op=updates.get(id);
+    if(!op){
+      const template=ECON_CATALOG.find(f=>f.name===F3_PRICE_NAMES[row.type]);
+      if(!template)throw Error('Не найден справочник корма '+row.type);
+      const after=JSON.parse(JSON.stringify(before||template));
+      if(!before&&special){
+        after.name=row.type==='se'?'F3 Среднеэнергетичный 8 мм · астаксантин '+row.astaxanthin+' мг/кг':'F3 Высокоэнергетичный+ 3 мм · астаксантин 30 мг/кг';
+        after.priceVariant=special;after.active=false;
+        after.rows=row.id==='plus30'?[{wFrom:40,wTo:100,fraction:3,fcr:null,rates:[1,1.2,1.5,1.8,2.2,2.7,2.2]}]:after.rows.filter(r=>Number(r.fraction)===row.fraction);
+        after.specs={...after.specs,protein:String(row.protein),fat:String(row.fat),astaxanthin:row.astaxanthin+' мг/кг',fractions:String(row.fraction)};
+        after.source='Прайс F3 '+book.title+', предоставлен владельцем 15.11.2026. Норма для указанной гранулы.';
+      }
+      op={id,before,after};updates.set(id,op);
+    }
+    const entry={date,fraction:row.fraction,price:row[channel],channel,sourceBook:book.id,sourceRow:row.id,
+      protein:row.protein,fat:row.fat,astaxanthin:row.astaxanthin};
+    const existing=(op.after.prices||[]).filter(p=>p.date===date&&String(p.fraction)===String(row.fraction));
+    if(existing.some(p=>Number(p.price)!==entry.price)&&!replaceSameDate)throw Error('Для '+op.after.name+' '+row.fraction+' мм на '+fmtDRaw(date)+' уже есть другая цена. Для её исправления отметьте «Заменить цены на ту же дату».');
+    op.after.prices=(op.after.prices||[]).filter(p=>!(p.date===date&&String(p.fraction)===String(row.fraction)));
+    op.after.prices.push(entry);
+    op.after.composition={...op.after.composition,[row.fraction]:{protein:row.protein,fat:row.fat,astaxanthin:row.astaxanthin}};
+  }
+  return Array.from(updates.values());
+}
+function renderF3Prices(){
+  const books=renderF3Prices._draft||f3PriceBooks();
+  const selected=renderF3Prices._selected||'se',book=books.find(b=>b.id===selected)||books[0];
+  renderF3Prices._base=JSON.parse(JSON.stringify(state.settings.f3PriceBook||null));
+  const n=(r,key)=>`<input aria-label="${esc(r.id+' '+F3_CHANNELS[key])}" name="f3_${r.id}_${key}" type="number" min="0.01" step="0.01" required value="${r[key]}" style="width:86px;min-width:74px;">`;
+  return `<section class="panel" id="f3PricesPanel">
+    <div class="panel-head"><h2>Прайсы F3</h2><button class="btn ghost small" id="f3PricesBackup">Скачать корма и прайсы</button></div>
+    <div class="panel-body">
+      <p class="hint">Цены в руб/кг, НДС 10% включён по исходным листам. На листах указан срок предложения до 30.09.2026; владелец предоставил их как актуальные 15.11.2026. Дату применения в учёте задайте ниже.</p>
+      <label for="f3BookSelect">Прайс производителя</label><select id="f3BookSelect">${books.map(b=>`<option value="${b.id}" ${b.id===book.id?'selected':''}>${esc(b.title)}</option>`).join('')}</select>
+      <form id="f3PriceBookForm" data-book="${book.id}">
+        <div class="table-wrap" style="margin-top:12px;"><table><thead><tr><th>Корм</th><th>Гранулы, мм</th><th>Протеин, %</th><th>Жир, %</th><th>Астаксантин, мг/кг</th><th>Завод</th><th>Ардон, опт</th><th>Ардон, розница</th></tr></thead><tbody>
+        ${book.rows.map(r=>`<tr><td>${r.type==='start'?'Стартовый':r.type==='se'?'СЭ':r.type==='ve'?'ВЭ':'ВЭ+'}</td><td>${fmtN(r.fraction,1)}</td><td>${r.protein}</td><td>${r.fat}</td><td>${r.astaxanthin}</td><td>${n(r,'factory')}</td><td>${n(r,'wholesale')}</td><td>${n(r,'retail')}</td></tr>`).join('')}
+        </tbody></table></div>
+        <p class="hint">Розница — партия до 2,5 т. Стартовые корма повторяются в трёх прайсах, но цены Ардона различаются. СЭ 8 мм с астаксантином 50 и 80 мг/кг — отдельные варианты.</p>
+        <button class="btn ghost" type="button" id="f3SaveReference">Сохранить прайсы</button>
+        <p class="hint">Сохранение прайсов обновляет справочные предложения. Чтобы цена участвовала в себестоимости, примените её с датой. Будущая корректировка прайса не меняет ранее применённые цены.</p>
+        <fieldset style="border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:14px;"><legend>Применить выбранный прайс к себестоимости</legend>
+          <div class="row"><div class="field"><label for="f3CostChannel">Тип цены</label><select id="f3CostChannel" name="channel"><option value="wholesale" ${renderF3Prices._channel!=='retail'?'selected':''}>Ардон — опт</option><option value="retail" ${renderF3Prices._channel==='retail'?'selected':''}>Ардон — розница</option></select></div>
+          <div class="field"><label for="f3CostDate">С даты</label><input id="f3CostDate" name="date" type="date" required value="${esc(renderF3Prices._date||'')}"></div></div>
+          <label><input type="checkbox" name="includeStart" ${renderF3Prices._includeStart?'checked':''}> Включить стартовые 1,5 и 2,0 мм из этого прайса</label>
+          <label><input type="checkbox" name="replaceSameDate"> Заменить цены на ту же дату</label>
+          <p class="hint">Добавится запись цены на каждую гранулу выбранного прайса. Более ранние и более поздние цены сохранятся. При смене опта на розницу укажите дату фактического перехода. История кормления и его объёмы сохраняются. Неуточнённый СЭ 8 мм требует выбора варианта 50/80 мг/кг в кормлении.</p>
+          <button class="btn" type="submit">Применить цены к себестоимости</button>
+        </fieldset>
+      </form><p id="f3PriceStatus" role="status">${esc(renderF3Prices._status||'')}</p>
+    </div></section>`;
+}
+async function f3CommitPrices(books,operations,expectedBook){
+  if(!db)throw Error('Нет связи с базой данных');
+  const stamp=Date.now(),bookDoc={version:1,books,updatedAt:stamp};
+  await db.runTransaction(async tx=>{
+    const bookRef=db.doc('settings/f3PriceBook'),bookSnap=await tx.get(bookRef);
+    const actualBook=bookSnap.exists?bookSnap.data():null;
+    if(stableJSON(actualBook)!==stableJSON(expectedBook))throw Error('Прайс изменён в другой вкладке. Обновите страницу и повторите.');
+    const snapshots=[];
+    for(const op of operations){const ref=db.doc('feeds/'+op.id),snap=await tx.get(ref);snapshots.push({op,ref,actual:snap.exists?snap.data():null});}
+    for(const {op,actual} of snapshots)if(stableJSON(actual)!==stableJSON(op.before))throw Error('Корм изменён в другой вкладке. Обновите страницу и повторите.');
+    const archive=(section,docId,before)=>tx.set(db.collection('archive').doc(),{section,docId,snapshot:before||{},action:'Прайсы F3',archivedAt:stamp,createdByImport:!before});
+    archive('settings','f3PriceBook',actualBook);tx.set(bookRef,bookDoc);
+    for(const {op,ref,actual} of snapshots){archive('feeds',op.id,actual);tx.set(ref,{...op.after,updatedAt:stamp});}
+  });
+}
+function wireF3Prices(main){
+  const form=main.querySelector('#f3PriceBookForm');if(!form)return;
+  const capture=()=>{
+    const books=renderF3Prices._draft||f3PriceBooks();
+    const book=f3ReadBookForm(form,books.find(b=>b.id===form.dataset.book));
+    return books.map(b=>b.id===book.id?book:b);
+  };
+  const status=message=>{renderF3Prices._status=message;const el=document.getElementById('f3PriceStatus');if(el)el.textContent=message;};
+  main.querySelector('#f3BookSelect').addEventListener('change',e=>{
+    try{renderF3Prices._draft=capture();renderF3Prices._date=form.elements.date.value;renderF3Prices._channel=form.elements.channel.value;renderF3Prices._includeStart=form.elements.includeStart.checked;renderF3Prices._selected=e.target.value;renderActive();}
+    catch(err){e.target.value=form.dataset.book;status(err.message);}
+  });
+  main.querySelector('#f3PricesBackup').addEventListener('click',async()=>{
+    try{const feeds=await Store.listCollection('feeds'),settings=await Store.listCollection('settings');downloadFarmJSON('ardon-feeds-prices-'+todayISO()+'.json',{version:1,feeds,priceBook:settings.f3PriceBook||null,exportedAt:new Date().toISOString()});status('Копия кормов и прайсов скачана');}catch(err){status(err.message);}
+  });
+  const save=async(apply)=>{
+    if(f3PricesBusy)return;
+    f3PricesBusy=true;status('Сохраняем цены…');
+    const buttons=form.querySelectorAll('button');buttons.forEach(b=>b.disabled=true);
+    try{
+      const books=capture(),book=books.find(b=>b.id===form.dataset.book);
+      renderF3Prices._draft=books;
+      const ops=apply?f3BuildPricePlan(book,form.elements.channel.value,form.elements.date.value,form.elements.includeStart.checked,form.elements.replaceSameDate.checked,state.feeds):[];
+      renderF3Prices._date=form.elements.date.value;renderF3Prices._channel=form.elements.channel.value;renderF3Prices._includeStart=form.elements.includeStart.checked;
+      const message=apply?'Прайс '+book.title+': цены «'+F3_CHANNELS[form.elements.channel.value]+'» применены с '+fmtDRaw(form.elements.date.value)+'. Кормов обновлено: '+ops.length+'.':'Все три прайса сохранены. Учётные цены не изменены.';
+      await f3CommitPrices(books,ops,renderF3Prices._base);
+      renderF3Prices._draft=null;status(message);
+    }catch(err){status(err.code==='resource-exhausted'?'Исчерпан бесплатный лимит Firebase. Цены не сохранены. Повторите применение после восстановления лимита.':err.message);}
+    finally{f3PricesBusy=false;renderActive();}
+  };
+  main.querySelector('#f3SaveReference').addEventListener('click',()=>save(false));
+  form.addEventListener('submit',e=>{e.preventDefault();save(true);});
+}
+
 function renderFeeds(){
   const feeds = econAllFeeds();
   const S = econSettings();
@@ -3735,8 +3904,8 @@ function renderFeeds(){
         <div class="two-col">
           <div>
             <label>Действующие цены на ${fmtD(todayISO())}</label>
-            <div class="table-wrap"><table><thead><tr><th>Фракция, мм</th><th>Цена, руб/кг</th><th>С даты</th></tr></thead><tbody>
-              ${cur.map(c=>`<tr><td>${fmtN(c.fraction,1)}</td><td class="num">${c.price?fmtN(c.price.price,2):'<span class="tag bad">нет цены</span>'}</td><td>${c.price?fmtD(c.price.date):"—"}</td></tr>`).join("")}
+            <div class="table-wrap"><table><thead><tr><th>Фракция, мм</th><th>Цена, руб/кг</th><th>С даты</th><th>Тип цены</th></tr></thead><tbody>
+              ${cur.map(c=>`<tr><td>${fmtN(c.fraction,1)}</td><td class="num">${c.price?fmtN(c.price.price,2):'<span class="tag bad">нет цены</span>'}</td><td>${c.price?fmtD(c.price.date):"—"}</td><td>${c.price?esc(F3_CHANNELS[c.price.channel]||"Вручную"):"—"}</td></tr>`).join("")}
             </tbody></table></div>
           </div>
           <div>
@@ -3768,6 +3937,7 @@ function renderFeeds(){
       <button class="btn" data-feed-seed="1">Добавить корма производителей</button>
       <span class="hint" style="margin-left:10px;">${ECON_CATALOG.length} форелевых кормов Aquarex и F3 с сайтов производителей — состав, фракции и нормы, без цен. Добавляются выключенными. Свой корм — кнопкой «+ Новый корм».</span>
     </div></div>` : ""}
+  ${renderF3Prices()}
   ${editor}
   ${renderFeedCompare(feeds)}
   ${(()=>{ const have = new Set(feeds.map(f=>String(f.name).trim().toLowerCase())); const miss = ECON_CATALOG.filter(f=> !have.has(f.name.toLowerCase())); return feeds.length && miss.length ? `<div class="panel"><div class="panel-body row" style="align-items:center; gap:10px;"><button class="btn ghost small" data-feed-catalog="1">Добавить корма производителей</button><span class="hint">${miss.length} форелевых кормов Aquarex и F3 с сайтов производителей (состав, фракции, нормы; без цен). Добавляются выключенными — включите те, что покупаете.</span></div></div>` : ""; })()}
@@ -4222,6 +4392,7 @@ function econSnapshotFeeds(){ return JSON.parse(JSON.stringify(econActiveFeeds()
 function econParseDays(s){ return String(s||"").split(/[,;\s]+/).map(x=>parseInt(x,10)).filter(x=> x>=1 && x<=31); }
 
 function wireEcon(main){
+  wireF3Prices(main);
   // --- корма и нормы
   main.querySelectorAll("[data-feed-new]").forEach(b=> b.addEventListener("click", ()=>{ renderFeeds._edit = "new"; renderFeeds._err = ""; renderActive(); }));
   main.querySelectorAll("[data-feed-edit]").forEach(b=> b.addEventListener("click", ()=>{ renderFeeds._edit = b.dataset.feedEdit; renderFeeds._err = ""; renderActive(); const el = document.getElementById("feedEditorPanel"); if(el) el.scrollIntoView({behavior:"smooth"}); }));
@@ -4258,10 +4429,11 @@ function wireEcon(main){
       const name = String(f.get("name")||"").trim();
       if(!name) throw new Error("Укажите название корма");
       const { temps, rows } = econParseNorms(f.get("norms"));
-      const prices = econParsePrices(f.get("prices"));
+      let prices = econParsePrices(f.get("prices"));
       const id = renderFeeds._edit !== "new" ? renderFeeds._edit : uid();
       const old = state.feeds[id];
-      await Store.setDoc("feeds", id, { name, manufacturer: String(f.get("manufacturer")||"").trim(), order: num(f.get("order")), active: f.get("active") !== "0", temps, rows, prices, source: (old && old.source) || "",
+      prices=prices.map(p=>{const previous=(old?.prices||[]).find(x=>x.date===p.date&&String(x.fraction)===String(p.fraction)&&Number(x.price)===p.price);return previous?{...previous,...p}:p;});
+      await Store.setDoc("feeds", id, { ...(old||{}), name, manufacturer: String(f.get("manufacturer")||"").trim(), order: num(f.get("order")), active: f.get("active") !== "0", temps, rows, prices, source: (old && old.source) || "",
         specs: { ...((old && old.specs) || {}), type: String(f.get("sp_type")||"").trim(), protein: String(f.get("sp_protein")||"").trim(), fat: String(f.get("sp_fat")||"").trim(), astaxanthin: String(f.get("sp_astaxanthin")||"").trim(), fractions: String(f.get("sp_fractions")||"").trim() },
         updatedAt: Date.now() });
       if(old) await archiveSnapshot("feeds", id, old, "edit");
