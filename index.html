@@ -228,6 +228,7 @@
     <button class="nav-btn" data-sec="summary"><span class="ic">&#9776;</span>Сводка</button>
     <button class="nav-btn" data-sec="charts"><span class="ic">&#128200;</span>Инфографика</button>
     <button class="nav-btn" data-sec="catalog"><span class="ic">&#128218;</span>Справочник кормов</button>
+    <button class="nav-btn" data-sec="offline"><span class="ic">⇅</span>Сохранение и синхронизация</button>
     <button class="nav-btn" data-sec="dataTools"><span class="ic">✓</span>Проверка данных</button>
     <button class="nav-btn" data-sec="archive"><span class="ic">&#128451;</span>Архив изменений</button>
     <button class="nav-btn" data-sec="users" id="navUsersBtn" style="display:none;"><span class="ic">&#128101;</span>Пользователи</button>
@@ -246,6 +247,7 @@
 <script>if(typeof XLSX==="undefined"){var s=document.createElement("script");s.src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";s.integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw";s.crossOrigin="anonymous";s.referrerPolicy="no-referrer";document.head.appendChild(s);}</script>
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js" integrity="sha384-AQ3POAMqIhwS81FrUH95ekxqBZHeP5tG2JfEL3+7GuTtfRLWnrRh32UxwzM+//A9" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js" integrity="sha384-qn4Jh88HhJA8dplNQyGjOh9OGI4izVhrfj/qIFgaKcdgOE06pXqIKGlsCILZcLAC" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="offline-store.js?v=1.1.0-3"></script>
 <script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js" integrity="sha384-TnlRYaR4JYz/lpaGuaiU61PjNberSA4vjLjtF+oRC/IkohkJqnWxw5EmDSOt1vA1" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 /* =========================================================================
@@ -292,51 +294,32 @@ let db = null;
 let auth = null;
 let dbAvailable = false;
 let downloadsCap = null;
-const mem = { stocking:{}, mortality:{}, feed:{}, o2:{}, temperature:{}, treatments:{}, catalog:{}, archive:{}, transfers:{}, incidents:{}, naveski:{}, users:{}, plots:{}, population:{}, feeds:{}, settings:{}, plans:{}, expenses:{} };
-const memWatchers = {};
-
-function memNotify(col){ (memWatchers[col]||[]).forEach(fn=>fn()); }
-
+let localStore=null;
+let localStatus={pending:0,missing:[],error:'',ready:[]};
+let offlineShellReady=false;
+let localImportStatus="";
 const storeReadErrors = {};
+function expectedLocalRecord(col,id){
+  const [base,plot]=col.split('__');
+  if(plot && plot!==currentPlotId)return localStore?ArdonOffline.view(localStore.s,col)[id]??null:null;
+  if(col==='expenses')return state.sharedExpenses[id]??state.expenses[id]??null;
+  return state[base]?.[id]??null;
+}
 const Store = {
-  async listCollection(col){
-    if(db){
-      const snap = await db.collection(col).get();
-      const out = {};
-      snap.docs.forEach(d=>{ out[d.id] = d.data(); });
-      return out;
-    }
-    mem[col] = mem[col] || {};
-    return {...mem[col]};
+  async listCollection(col){if(!localStore)throw Error('Локальная база ещё не открыта');return localStore.listCollection(col);},
+  watchCollection(col,cb,onError){
+    if(col==='users')return db.collection(col).onSnapshot(snap=>{if(snap.metadata.fromCache)return;const out={};snap.docs.forEach(d=>out[d.id]=d.data());cb(out);},onError||(()=>{}));
+    return localStore.watchCollection(col,cb,onError);
   },
-  watchCollection(col, cb, onError){
-    if(db){
-      return db.collection(col).onSnapshot(snap=>{
-        delete storeReadErrors[col];
-        const out = {};
-        snap.docs.forEach(d=>{ out[d.id] = d.data(); });
-        cb(out);
-      }, err=>{ storeReadErrors[col]=err.code||err.message; console.warn("db watch error", col, err); if(onError) onError(err); scheduleRender(); });
-    }
-    mem[col] = mem[col] || {};
-    memWatchers[col] = memWatchers[col] || [];
-    const fn = ()=> cb({...mem[col]});
-    memWatchers[col].push(fn);
-    fn();
-    return ()=>{ memWatchers[col] = memWatchers[col].filter(f=>f!==fn); };
+  async setDoc(col,id,data){
+    if(col==='users'){if(!navigator.onLine||localStatus.error)throw Error('Управление доступом требует связи с сервером');return db.doc(col+'/'+id).set(data);}
+    if(!localStore)throw Error('Локальная база ещё не открыта');
+    return localStore.commit([{col,id,before:expectedLocalRecord(col,id),after:data}]);
   },
-  async setDoc(col, id, data){
-    if(db){ await db.doc(col+"/"+id).set(data); }
-    else{ mem[col] = mem[col] || {}; mem[col][id] = JSON.parse(JSON.stringify(data)); memNotify(col); }
-  },
-  async addDoc(col, data){
-    const id = uid();
-    await this.setDoc(col, id, data);
-    return id;
-  },
-  async deleteDoc(col, id){
-    if(db){ await db.doc(col+"/"+id).delete(); }
-    else{ mem[col] = mem[col] || {}; delete mem[col][id]; memNotify(col); }
+  async addDoc(col,data){if(!localStore)throw Error('Локальная база ещё не открыта');return localStore.addDoc(col,data);},
+  async deleteDoc(col,id){
+    if(col==='users'){if(!navigator.onLine||localStatus.error)throw Error('Управление доступом требует связи с сервером');return db.doc(col+'/'+id).delete();}
+    return localStore.commit([{col,id,before:expectedLocalRecord(col,id),after:null}],'Удаление');
   }
 };
 
@@ -404,7 +387,7 @@ function syncExpensePlotData(){
   Object.keys(state.plots).forEach(id=>{
     if(expensePlotWatches[id]) return;
     // feed и o2 нужны для той же оси дат, что и в обычном расчёте численности.
-    const cols = ["stocking","mortality","incidents","population","transfers","naveski","feed","o2"];
+    const cols = PLOT_SCOPED_COLLECTIONS; // Полная локальная копия каждого участка; подписки объединены.
     const context = {ready:false,failed:false,data:{feed:{},o2:{}}};
     state.expensePlotData[id] = context;
     const loaded = new Set(), failed = new Set();
@@ -488,34 +471,17 @@ async function forceLogout(reason){
 }
 
 function startUsersStore(){
-  if(usersStoreStarted) return;
-  usersStoreStarted = true;
-  const uid = currentUser.key;
-  if(!db){
-    Store.watchCollection("users", data=>{ state.users = data; usersLoaded = true; ensureProfile(); scheduleRender(); });
-    return;
-  }
-  // Обычный аккаунт читает только свою карточку: чужие почты и роли ему
-  // не нужны, и правила базы их ему не отдают.
-  db.collection("users").doc(uid).onSnapshot(snap=>{
-    const rec = snap.exists ? snap.data() : null;
-    const next = {...state.users};
-    if(rec) next[uid] = rec; else delete next[uid];
-    state.users = next;
-    usersLoaded = true;
-    ensureProfile();
-    if(hasAccess()){
-      accessWasGranted = true;
-    } else if(accessWasGranted){
-      accessWasGranted = false;
-      forceLogout("Администратор закрыл доступ к данным. Войдите ещё раз или обратитесь к администратору.");
-      return;
-    }
-    if(roleOf(uid) === "admin") startAdminUsersStore();
-    scheduleRender();
-  }, err=>{
-    console.warn("users doc watch failed", err);
-    usersLoaded = true;
+  if(usersStoreStarted || !localStore) return;
+  usersStoreStarted=true;
+  const uid=currentUser.key;
+  localStore.watchProfile((rec,fromServer)=>{
+    if(!currentUser || currentUser.key!==uid)return;
+    state.users=rec?{...state.users,[uid]:rec}:{};
+    usersLoaded=true;
+    if(fromServer)ensureProfile();
+    if(hasAccess())accessWasGranted=true;
+    else if(accessWasGranted){accessWasGranted=false;forceLogout('Администратор закрыл доступ к данным. Обратитесь к администратору.');return;}
+    if(fromServer && roleOf(uid)==='admin' && activeSection==='users')startAdminUsersStore();
     scheduleRender();
   });
 }
@@ -645,6 +611,7 @@ async function handleLogin(emailRaw, password){
 function tryAutoLogin(){ /* сессию восстанавливает сам Firebase Auth */ }
 
 async function logout(){
+  localStore?.close();
   try{ if(auth) await auth.signOut(); }catch(err){ console.warn("signOut failed", err); }
   currentUser = null;
   // Перезагружаем страницу, чтобы уже загруженные данные не остались
@@ -1027,19 +994,7 @@ const SECTION_NAMES = {
   feeds:"Корма и нормы", plans:"Расчёт роста", expenses:"Прочие затраты"
 };
 
-async function archiveSnapshot(col, docId, oldData, action){
-  if(!oldData) return;
-  try{
-    const plot = currentPlot();
-    await Store.addDoc("archive", {
-      // в поле date — только дата вида ГГГГ-ММ-ДД (так требуют правила базы);
-      // у кормов и планов id документа не дата, для них date пустая
-      section: col, docId, date: oldData.date || (/^\d{4}-\d{2}-\d{2}$/.test(docId) ? docId : ""),
-      action, snapshot: oldData, archivedAt: Date.now(),
-      plotId: currentPlotId || LEGACY_PLOT_ID, plotName: plot ? plot.name : "Ардон"
-    });
-  }catch(err){ console.warn("archive failed", err); }
-}
+async function archiveSnapshot(){ /* Архив создаётся вместе с записью в очереди синхронизации. */ }
 
 function formatSnapshot(col, data){
   if(!data) return "—";
@@ -1116,16 +1071,20 @@ function renderActive(){
   }
   if(!usersLoaded){
     if(appEl) appEl.classList.add("logged-out");
-    main.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="panel"><div class="panel-body" style="text-align:center; color:var(--ink-dim);">Загрузка…</div></div></div></div>`;
+    main.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="panel"><div class="panel-body" style="text-align:center; color:var(--ink-dim);">Для первого запуска нужна загрузка вашей карточки доступа с сервера. После неё вход и данные будут доступны на этом ПК без связи.<p id="offlineLoginStatus"></p><button class="btn" id="offlineLoginRetry">Повторить подключение</button>${localImportForm()}</div></div></div></div>`;
+    document.getElementById('offlineLoginRetry')?.addEventListener('click',()=>localStore?.retry());
+    updateLocalStatus(localStatus);wireLocalImport();
     return;
   }
   if(!hasAccess()){
+
     if(appEl) appEl.classList.add("logged-out");
     main.innerHTML = renderPendingScreen();
     wireActiveSection();
     return;
   }
   startDataStore();
+  if(activeSection==='users' && isAdmin() && !localStatus.error && navigator.onLine)startAdminUsersStore();
   if(appEl) appEl.classList.remove("logged-out");
   updateNavUser();
   const navUsersBtn = document.getElementById("navUsersBtn");
@@ -1133,7 +1092,7 @@ function renderActive(){
   if(activeSection === "users" && !isAdmin()) activeSection = "dash";
   syncPoolsFromPlot();
   const renderers = {
-    dataTools: renderDataTools, plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
+    offline: renderOffline, dataTools: renderDataTools, plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
     summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp,
     plan: renderPlan, cost: renderCost, feeds: renderFeeds,
@@ -1201,18 +1160,14 @@ function wireDataTools(){
     try{
       for(const op of batch.operations){
         const col=plotColName(op.collection,plotId);
-        if(db){await db.runTransaction(async tx=>{
-          const ref=db.doc(col+'/'+op.id),snap=await tx.get(ref),before=snap.exists?snap.data():null;
-          if(stableJSON(before)===stableJSON(op.after)){skip++;return;}
-          if(stableJSON(before)!==stableJSON(op.before??null))throw Error('Запись изменилась после сверки: '+op.collection+' / '+op.id);
-          const audit=db.collection('archive').doc();
-          tx.set(audit,{section:op.collection,docId:op.id,date:op.after.date,action:'Импорт: '+(op.reason||batch.source||''),snapshot:before||{},archivedAt:Date.now(),plotId,plotName:batch.plotName||'',createdByImport:!before});
-          tx.set(ref,op.after);
-        });}else{throw Error('Нет связи с базой. Импорт не выполнен');}
+        if(!localStore)throw Error('Локальная база ещё не открыта');
+        const existing=(await localStore.listCollection(col))[op.id]??null;
+        if(stableJSON(existing)===stableJSON(op.after))skip++;
+        else await localStore.commit([{col,id:op.id,before:op.before??null,after:op.after}],'Импорт: '+(op.reason||batch.source||''));
         done++;farmImportStatus='Обработано '+done+' из '+batch.operations.length+'. Уже совпадали: '+skip;
         const status=document.getElementById('farmImportStatus');if(status)status.textContent=farmImportStatus;
       }
-      farmImportStatus='Готово. Обработано '+done+' записей. Уже совпадали: '+skip+'. Прежние значения сохранены в архиве.';farmImport=null;
+      farmImportStatus='Сохранено на ПК; отправка на сайт идёт через очередь. Обработано '+done+' записей. Уже совпадали: '+skip+'. Прежние значения включены в очередь архива.';farmImport=null;
     }catch(e){farmImportStatus='Остановлено после '+done+' записей: '+(e.code==='resource-exhausted'?'Исчерпан лимит Firebase. Повторите после восстановления лимита':e.message)+'. Повторная загрузка того же файла безопасна: совпадающие записи будут пропущены.';}
     finally{farmImportBusy=false;renderActive();}
   });
@@ -1241,15 +1196,77 @@ function renderPassword(){
   </div>`;
 }
 
-function topbar(title, sub, extra){
-  const unavailable=Object.keys(storeReadErrors).length>0;
-  return `<div class="topbar">
-    <div><h1>${title}</h1><div class="sub">${sub||""}</div></div>
-    <div class="row" style="align-items:center; gap:10px;">
-      ${extra||""}
-      <span class="status-pill ${dbAvailable&&!unavailable?'ok':'off'}">${unavailable?'Данные загружены не полностью — ошибка сервера':dbAvailable? '&#9679; подключено' : '&#9679; локальный режим (без сохранения)'}</span>
-    </div>
-  </div>`;
+function localStatusText(){
+  const q=localStatus;
+  if(q.conflict)return 'Сохранено на ПК · требуется сравнение версий';
+  if(q.error && q.error.startsWith('Локальное'))return q.error;
+  if(q.pending)return 'Сохранено на ПК · ожидают отправки: '+q.pending;
+  if(q.missing?.length)return 'Идёт подготовка локальной копии';
+  if(q.error || q.offline)return 'Локальная копия · сервер недоступен';
+  return localStore?'На ПК · нет ожидающих изменений':'Открытие локальной базы…';
+}
+function updateLocalStatus(status){
+  localStatus=status;
+  document.querySelectorAll('[data-local-status]').forEach(el=>{el.textContent=localStatusText();el.className='status-pill '+(status.pending||status.error||status.conflict?'off':'ok');});
+  const login=document.getElementById('offlineLoginStatus');
+  if(login)login.textContent=syncErrorText(status.error);
+  if(activeSection==='offline' && currentUser && hasAccess()){
+    const main=document.getElementById('main');if(main){main.innerHTML=renderOffline();wireOffline();}
+  }
+}
+function syncErrorText(code){
+  if(code==='resource-exhausted')return 'Бесплатный лимит Firebase исчерпан. Записи остаются на ПК; следующая автоматическая попытка — не чаще одного раза в 15 минут.';
+  if(code==='permission-denied'||code==='unauthenticated')return 'Сервер не подтвердил доступ. Локальные изменения сохранены; проверьте вход и права доступа перед повторной отправкой.';
+  if(code==='unavailable'||code==='deadline-exceeded')return 'Нет связи с сервером. Работа продолжается с локальной копией.';
+  return code||'';
+}
+function topbar(title,sub,extra){return `<div class="topbar"><div><h1>${title}</h1><div class="sub">${sub||''}</div></div><div class="row" style="align-items:center;gap:10px">${extra||''}<button type="button" class="status-pill" data-local-status>${esc(localStatusText())}</button></div></div>`;}
+function renderOffline(){
+  const q=localStatus,job=q.job,conflict=q.conflict;
+  const names=cols=>[...new Set(cols)].map(c=>{const [base,plot]=c.split('__');return (SECTION_NAMES[base]||({settings:'Настройки и прайсы',plots:'Участки',archive:'Архив изменений'}[base])||base)+(plot?' · '+(state.plots[plot]?.name||plot):'');});
+  return topbar('Сохранение и синхронизация','Данные сначала сохраняются на этом ПК, затем отправляются в общую базу сайта')+`
+  <div class="panel"><div class="panel-body">
+    <h2>${esc(localStatusText())}</h2>
+    <p>В очереди: <b>${q.pending||0}</b> операций, записей: <b>${q.documents||0}</b>. ${q.syncing?'Сейчас отправляем…':''}</p>
+    ${q.provisional?'<div class="alert warn">Открыты данные из резервной копии. Работа и сохранение на ПК доступны. Отправка на сайт начнётся только после проверки вашего доступа сервером.</div>':''}
+    ${q.imported?.length?'<p class="hint">Загружены резервные копии от: '+esc(q.imported.map(x=>x.exportedAt?new Date(x.exportedAt).toLocaleString('ru-RU'):'дата не указана').join(', '))+'. Учитываются записи, которые попали в эти копии; более поздние записи с сайта появятся после подключения.</p>':''}
+    <p>Последняя подтверждённая отправка: ${q.lastSynced?esc(new Date(q.lastSynced).toLocaleString('ru-RU')):'ещё не было'}.</p>
+    ${q.error?'<div class="alert warn">'+esc(syncErrorText(q.error))+'</div>':''}
+    ${q.retryAt>Date.now()?'<p>Следующая проверка после '+esc(new Date(q.retryAt).toLocaleTimeString('ru-RU'))+'.</p>':''}
+    <button class="btn" id="syncRetry" ${q.syncing?'disabled':''}>Проверить связь и синхронизировать</button>
+    <button class="btn ghost" id="localBackup">Скачать полную локальную копию</button>
+    <p class="hint">Копия включает все загруженные участки, корма, прайсы и очередь изменений. До отправки на сайт записи доступны только на этом компьютере. Автоматическая отправка работает, пока приложение открыто; после закрытия очередь сохраняется и продолжит работу при следующем запуске.</p>
+    <p>Запуск без интернета: <b>${offlineShellReady?'подготовлен':'готовится — первый запуск выполняйте с интернетом'}</b>.</p>
+    <p>${q.missing?.length?'Ещё не загружены: '+esc(names(q.missing).join(', '))+'. Эти разделы станут доступны для изменения после первой полной загрузки.':'Все открытые разделы имеют локальную копию.'}</p>
+    <p class="hint">Версия на ПК, сайт в браузере и локальный просмотр имеют отдельные копии. Не очищайте данные программы или сайта до отправки очереди. Первый вход и смена пароля требуют интернета.</p>
+  </div></div>
+  ${conflict?`<div class="panel"><div class="panel-body"><h2>Одна запись изменена в двух местах</h2><p>Отправка остановлена, обе версии сохранены. Операция: ${esc(job.label)}. Ничего не перезаписывается автоматически.</p>
+  ${conflict.items.map(x=>`<h3>${esc(names([x.col])[0])} · ${esc(x.id)}</h3><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px"><div><b>На этом ПК</b><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(x.local,null,2))}</pre></div><div><b>На сайте</b><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(x.server,null,2))}</pre></div></div>`).join('')}
+  <button class="btn" id="syncKeepLocal" data-job="${esc(job.id)}">Отправить мою версию</button>
+  <button class="btn ghost" id="syncKeepServer" data-job="${esc(job.id)}">Принять версию сайта</button>
+  <p class="hint">При выборе сайта потребуется отменить всю последующую локальную очередь (всего ${q.dependent} операций): пересадки и затраты могут зависеть друг от друга. Её копия сохранится в резервном файле и в локальной истории отменённых операций.</p></div></div>`:''}
+  <div class="panel"><div class="panel-body">${localImportForm()}</div></div>
+  <div class="panel"><div class="panel-body"><h2>Ожидают отправки</h2>${localStore?.s.queue.slice(0,100).map(j=>'<p>'+esc(new Date(j.createdAt).toLocaleString('ru-RU'))+' · '+esc(j.label)+' · '+esc(names(j.ops.map(o=>o.col)).join(', '))+'</p>').join('')||'<p>Очередь пуста.</p>'}</div></div>`;
+}
+function localImportForm(){return `<div style="margin-top:18px;text-align:left"><h3>Открыть резервную копию на ПК</h3><p class="hint">Если сервер недоступен при первом запуске, выберите ранее скачанные JSON-копии участка и кормов. Можно выбрать несколько файлов. Это открывает локальные данные; само восстановление не отправляет старые записи на сайт и не заменяет уже загруженные разделы.</p><label for="localImportFiles">Файлы резервных копий</label><input type="file" id="localImportFiles" multiple accept=".json,application/json"><p role="status" id="localImportStatus">${esc(localImportStatus)}</p></div>`;}
+function wireLocalImport(){
+  document.getElementById('localImportFiles')?.addEventListener('change',async e=>{
+    const files=Array.from(e.target.files||[]);if(!files.length)return;
+    try{const values=[];for(const file of files)values.push(JSON.parse(await file.text()));await localStore.importBackups(values);localImportStatus='Копия открыта на этом ПК. Файлов: '+files.length+'. Исходные файлы сохранены.';renderActive();toast(localImportStatus);}
+    catch(err){localImportStatus=err.message;const out=document.getElementById('localImportStatus');if(out)out.textContent=localImportStatus;}
+  });
+}
+function wireOffline(){
+  wireLocalImport();
+  document.querySelectorAll('[data-local-status]').forEach(b=>b.addEventListener('click',()=>{activeSection='offline';renderActive();}));
+  document.getElementById('syncRetry')?.addEventListener('click',()=>localStore.retry().catch(e=>toast(e.message)));
+  document.getElementById('localBackup')?.addEventListener('click',async()=>{try{downloadFarmJSON('ardon-local-'+todayISO()+'.json',await localStore.backup());}catch(e){toast(e.message);}});
+  for(const choice of ['Local','Server'])document.getElementById('syncKeep'+choice)?.addEventListener('click',async e=>{
+    const id=e.currentTarget.dataset.job;
+    const message=choice==='Local'?'Отправить вашу версию на сайт? Перед отправкой серверная версия будет проверена ещё раз.':'Принять данные сайта и убрать из работы '+localStatus.dependent+' локальных операций? Перед этим будет скачана их резервная копия.';
+    if(!confirm(message))return;
+    try{downloadFarmJSON('ardon-before-conflict-'+todayISO()+'.json',await localStore.backup());await localStore.resolve(choice.toLowerCase(),id);}catch(err){toast(err.message);}
+  });
 }
 
 /* ---------------------------------------------------------------------
@@ -2486,10 +2503,11 @@ function renderHelp(){
     — Графики на «Инфографике» — обновляются сразу после внесения новых данных.<br>
     — Тревоги на «Дашборде»: низкий О2, всплеск отхода, пропущенные записи за сегодня.<br>
     — Раздел <b>«Архив изменений»</b>: при исправлении или удалении любой записи прежнее значение не пропадает, а сохраняется там с меткой времени — можно посмотреть, что было раньше.</p>
-    <h3>Данные</h3>
-    <p>${dbAvailable ? "Все записи хранятся в общей базе этой программы — их видят все, у кого есть ссылка, и они сохраняются между посещениями." : "Сейчас база данных недоступна — введённые данные будут видны только в этой вкладке до перезагрузки страницы."}</p>
-    <h3>Вход по имени пользователя и паролю</h3>
-    <p>При открытии приложения нужно войти или зарегистрироваться — это несложная защита от случайных людей по ссылке, а не промышленный уровень безопасности: пароль хранится в виде хеша (не в открытом виде), но сама база данных доступна из кода страницы всем, у кого есть ссылка на приложение. Регистрация открыта для всех, у кого есть ссылка — отдельного приглашения не требуется. После входа сессия запоминается в этом браузере, пока не нажать «Выйти» в левом нижнем углу.</p>
+    <h3>Сохранение на ПК и синхронизация</h3>
+    <p>После первого входа и полной загрузки данные сохраняются на этом компьютере. Каждое изменение сначала записывается на ПК, включая пересадки, расходы и цены кормов; расчёты сразу учитывают его. При отсутствии интернета или исчерпании лимита Firebase можно продолжать работу с загруженными разделами. Очередь сохраняется после закрытия программы.</p>
+    <p>Откройте «Сохранение и синхронизация», чтобы увидеть очередь, проверить связь или скачать полную локальную копию. При открытом приложении отправка возобновляется автоматически. На сайте изменения появляются после подтверждения сервера. Если одну запись изменили в двух местах, приложение сохраняет обе версии и просит выбрать подходящую.</p>
+    <h3>Вход и доступ</h3>
+    <p>Почту и пароль проверяет Firebase Authentication. Данные доступны только подтверждённым пользователям; доступ предоставляет администратор. Первый вход и смена пароля требуют интернета. Сохранённая сессия и карточка доступа позволяют работать с локальной копией офлайн на личном ПК. После выхода для нового входа снова потребуется интернет. Не очищайте данные приложения, пока есть неотправленные изменения.</p>
     <h3>Установка как отдельного приложения</h3>
     <p>Страницу можно установить как приложение — с иконкой и отдельным окном, без адресной строки браузера:</p>
     <p><b>GrapheneOS / Android:</b> откройте ссылку в браузере (Vanadium/Chrome), откройте меню (⋮) и выберите «Установить приложение» или «Добавить на главный экран».<br>
@@ -2503,6 +2521,7 @@ function renderHelp(){
    Wiring: form submits + delete/edit buttons for the active section
    ------------------------------------------------------------------- */
 function wireActiveSection(){
+  wireOffline();
   wireDataTools();
   const main = document.getElementById("main");
 
@@ -3794,19 +3813,12 @@ function renderF3Prices(){
     </div></section>`;
 }
 async function f3CommitPrices(books,operations,expectedBook){
-  if(!db)throw Error('Нет связи с базой данных');
-  const stamp=Date.now(),bookDoc={version:1,books,updatedAt:stamp};
-  await db.runTransaction(async tx=>{
-    const bookRef=db.doc('settings/f3PriceBook'),bookSnap=await tx.get(bookRef);
-    const actualBook=bookSnap.exists?bookSnap.data():null;
-    if(stableJSON(actualBook)!==stableJSON(expectedBook))throw Error('Прайс изменён в другой вкладке. Обновите страницу и повторите.');
-    const snapshots=[];
-    for(const op of operations){const ref=db.doc('feeds/'+op.id),snap=await tx.get(ref);snapshots.push({op,ref,actual:snap.exists?snap.data():null});}
-    for(const {op,actual} of snapshots)if(stableJSON(actual)!==stableJSON(op.before))throw Error('Корм изменён в другой вкладке. Обновите страницу и повторите.');
-    const archive=(section,docId,before)=>tx.set(db.collection('archive').doc(),{section,docId,snapshot:before||{},action:'Прайсы F3',archivedAt:stamp,createdByImport:!before});
-    archive('settings','f3PriceBook',actualBook);tx.set(bookRef,bookDoc);
-    for(const {op,ref,actual} of snapshots){archive('feeds',op.id,actual);tx.set(ref,{...op.after,updatedAt:stamp});}
-  });
+  if(!localStore)throw Error('Локальная база ещё не открыта');
+  const stamp=Date.now();
+  await localStore.commit([
+    {col:'settings',id:'f3PriceBook',before:expectedBook,after:{version:1,books,updatedAt:stamp}},
+    ...operations.map(op=>({col:'feeds',id:op.id,before:op.before,after:{...op.after,updatedAt:stamp}}))
+  ],'Прайсы F3');
 }
 function wireF3Prices(main){
   const form=main.querySelector('#f3PriceBookForm');if(!form)return;
@@ -3834,7 +3846,7 @@ function wireF3Prices(main){
       renderF3Prices._date=form.elements.date.value;renderF3Prices._channel=form.elements.channel.value;renderF3Prices._includeStart=form.elements.includeStart.checked;
       const message=apply?'Прайс '+book.title+': цены «'+F3_CHANNELS[form.elements.channel.value]+'» применены с '+fmtDRaw(form.elements.date.value)+'. Кормов обновлено: '+ops.length+'.':'Все три прайса сохранены. Учётные цены не изменены.';
       await f3CommitPrices(books,ops,renderF3Prices._base);
-      renderF3Prices._draft=null;status(message);
+      renderF3Prices._draft=null;status(message+' Сохранено на ПК. Статус отправки на сайт — в разделе «Сохранение и синхронизация».');
     }catch(err){status(err.code==='resource-exhausted'?'Исчерпан бесплатный лимит Firebase. Цены не сохранены. Повторите применение после восстановления лимита.':err.message);}
     finally{f3PricesBusy=false;renderActive();}
   };
@@ -4897,6 +4909,11 @@ const FIREBASE_CONFIG = {
 };
 
 async function boot(){
+  window.addEventListener('unhandledrejection',e=>{toast('Не удалось сохранить: '+(e.reason?.message||'повторите попытку'));});
+  if('serviceWorker'in navigator){
+    navigator.serviceWorker.register('sw.js').then(()=>navigator.serviceWorker.ready).then(()=>{offlineShellReady=true;updateLocalStatus(localStatus);}).catch(e=>console.warn('Offline shell not ready',e));
+  }
+
   try{
     if(window.firebase && typeof firebase.initializeApp === "function"){
       firebase.initializeApp(FIREBASE_CONFIG);
@@ -4904,7 +4921,7 @@ async function boot(){
       auth = firebase.auth();
       // Вход запоминается между запусками браузера — выбрано осознанно:
       // компьютеры личные. Для общего компьютера здесь ставится SESSION.
-      try{ auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); }
+      try{ await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); }
       catch(err){ console.warn("setPersistence failed", err); }
     }
   }catch(err){ console.warn("Firebase unavailable, falling back to local memory", err); db = null; auth = null; }
@@ -4912,11 +4929,18 @@ async function boot(){
   if(auth){
     // Вход/выход отслеживает сам Firebase: сессия восстанавливается
     // автоматически, отдельное хранение ключа в браузере не нужно.
-    auth.onAuthStateChanged(user=>{
+    auth.onAuthStateChanged(async user=>{
       if(user){
         currentUser = { username: user.email || user.uid, key: user.uid, email: user.email || "" };
-        startUsersStore();
+        try{
+          if(localStore && localStore.uid!==user.uid){localStore.close();location.reload();return;}
+          if(!localStore)localStore=await new ArdonOffline.OfflineStore({uid:user.uid,db,onStatus:updateLocalStatus,onFatal:message=>toast(message)}).open();
+          navigator.storage?.persist?.().catch(()=>{});
+          startUsersStore();
+        }catch(e){toast('Локальная база не открылась: '+e.message);}
+
       } else {
+        localStore?.close();localStore=null;
         currentUser = null;
         state.users = {};
         usersLoaded = false;
