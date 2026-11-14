@@ -228,6 +228,7 @@
     <button class="nav-btn" data-sec="summary"><span class="ic">&#9776;</span>Сводка</button>
     <button class="nav-btn" data-sec="charts"><span class="ic">&#128200;</span>Инфографика</button>
     <button class="nav-btn" data-sec="catalog"><span class="ic">&#128218;</span>Справочник кормов</button>
+    <button class="nav-btn" data-sec="dataTools"><span class="ic">✓</span>Проверка данных</button>
     <button class="nav-btn" data-sec="archive"><span class="ic">&#128451;</span>Архив изменений</button>
     <button class="nav-btn" data-sec="users" id="navUsersBtn" style="display:none;"><span class="ic">&#128101;</span>Пользователи</button>
     <div class="sec-label">&nbsp;</div>
@@ -296,6 +297,7 @@ const memWatchers = {};
 
 function memNotify(col){ (memWatchers[col]||[]).forEach(fn=>fn()); }
 
+const storeReadErrors = {};
 const Store = {
   async listCollection(col){
     if(db){
@@ -310,10 +312,11 @@ const Store = {
   watchCollection(col, cb, onError){
     if(db){
       return db.collection(col).onSnapshot(snap=>{
+        delete storeReadErrors[col];
         const out = {};
         snap.docs.forEach(d=>{ out[d.id] = d.data(); });
         cb(out);
-      }, err=>{ console.warn("db watch error", col, err); if(onError) onError(err); });
+      }, err=>{ storeReadErrors[col]=err.code||err.message; console.warn("db watch error", col, err); if(onError) onError(err); scheduleRender(); });
     }
     mem[col] = mem[col] || {};
     memWatchers[col] = memWatchers[col] || [];
@@ -364,7 +367,7 @@ function currentPlot(){ return state.plots[currentPlotId] || null; }
 
 function syncPoolsFromPlot(){
   const plot = currentPlot();
-  POOLS = (plot && Array.isArray(plot.pools)) ? plot.pools : LEGACY_POOLS;
+  POOLS = historicalPools(state,(plot && Array.isArray(plot.pools)) ? plot.pools : LEGACY_POOLS);
   const nameEl = document.getElementById("currentPlotName");
   if(nameEl) nameEl.textContent = plot ? plot.name : "—";
 }
@@ -461,7 +464,7 @@ const state = {
 let renderQueued = false;
 function scheduleRender(){
   econVersion++; // данные изменились — кэш расчётов экономики устарел
-  if(renderQueued) return;
+  if(farmImportBusy || renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(()=>{ renderQueued=false; renderActive(); });
 }
@@ -717,7 +720,7 @@ function allDates(data=state){
   // файле её даты уходят далеко за пределы текущего цикла выращивания),
   // поэтому она не участвует в общей оси дат стада/отхода/корма/графиков.
   const s = new Set();
-  ["mortality","feed","o2","stocking","transfers","incidents"].forEach(col=>Object.values(data[col]||{}).forEach(d=>s.add(d.date)));
+  ["mortality","feed","o2","stocking","transfers","incidents","naveski"].forEach(col=>Object.values(data[col]||{}).forEach(d=>s.add(d.date)));
   Object.values(data.population||{}).forEach(d=>{ if(d && d.date) s.add(d.date); });
   return [...s].sort();
 }
@@ -768,69 +771,13 @@ function populationSnapshots(data=state,pools=POOLS){
   return snaps;
 }
 
-function buildLegacyPopulation(data=state,pools=POOLS){
-  const dates = allDates(data);
-  const stockByDate = {};
-  Object.values(data.stocking||{}).forEach(s=>{
-    stockByDate[s.date] = stockByDate[s.date] || {};
-    stockByDate[s.date][s.pool] = (stockByDate[s.date][s.pool]||0) + num(s.count);
-  });
-  const transferByDate = {};
-  Object.values(data.transfers||{}).forEach(t=>{
-    transferByDate[t.date] = transferByDate[t.date] || [];
-    transferByDate[t.date].push(t);
-  });
-  const incByDate = incidentValuesByDate(data);
-  const snaps = populationSnapshots(data,pools);
-  const snapDates = Object.keys(snaps).sort();
-  const lastSnapDate = snapDates.length ? snapDates[snapDates.length-1] : null;
-  const running = {}; pools.forEach(p=>running[p]=0);
-  const started = {}; pools.forEach(p=>started[p]=false);
-  const byDate = {};
-  let baseSnap = null;   // фактический остаток на дату последнего снимка
-  let baseCalc = null;   // расчётный остаток на ту же дату
-  dates.forEach(date=>{
-    const sAdd = stockByDate[date] || {};
-    const mVals = (data.mortality && data.mortality[date] && data.mortality[date].values) || {};
-    const iVals = incByDate[date] || {};
-    pools.forEach(p=>{
-      if(sAdd[p]){ running[p] += sAdd[p]; started[p]=true; }
-      if(mVals[p]){ running[p] = Math.max(0, running[p] - num(mVals[p])); }
-      if(iVals[p]){ running[p] = Math.max(0, running[p] - num(iVals[p])); }
-    });
-    (transferByDate[date]||[]).forEach(t=>{
-      const c = num(t.count);
-      if(pools.includes(t.from)) running[t.from] = Math.max(0, running[t.from] - c);
-      if(pools.includes(t.to)){ running[t.to] += c; started[t.to] = true; }
-    });
-    const snap = snaps[date];
-    if(snap){
-      // Есть снимок фактической численности — он и есть остаток на этот день.
-      const row = {};
-      pools.forEach(p=>{
-        row[p] = (snap[p] !== undefined) ? snap[p] : 0;
-        if(row[p] > 0) started[p] = true;
-      });
-      byDate[date] = row;
-      if(date === lastSnapDate){ baseSnap = {...row}; baseCalc = {...running}; }
-    } else if(baseSnap && lastSnapDate && date > lastSnapDate){
-      // После последнего снимка ведём остаток от него по журналам.
-      const row = {};
-      pools.forEach(p=>{
-        row[p] = Math.max(0, num(baseSnap[p]) + (num(running[p]) - num(baseCalc[p])));
-        if(row[p] > 0) started[p] = true;
-      });
-      byDate[date] = row;
-    } else {
-      byDate[date] = {...running};
-    }
-  });
-  return { dates, byDate, started };
-}
-
+function buildLegacyPopulation(data=state,pools=POOLS){ return buildHerdState(data,pools); }
 
 // Масса партии хранится независимо от оценённого числа рыб. Дробная оценка
 // сохраняется в расчёте; округление до целых применяется только на экране.
+function transferIsFull(t){
+  return t.to!==OUT && (t.fullTransfer===true || (t.fullTransfer===undefined && /^из\s*(?:\d+|ЗБ)\s*в\s*(?:\d+|ЗБ)\s*\(?все(?:\s|\)|$)/i.test(String(t.comment||''))));
+}
 function transferCount(t){
   return t.to!==OUT && num(t.transferKg)>0 && num(t.weight)>0 ? num(t.transferKg)/num(t.weight) : Math.max(0,num(t.count));
 }
@@ -864,7 +811,14 @@ function applyHerdTransfer(t,counts,biomass,reconciled={}){
   prepareTransferMeasurements(t,counts,biomass,reconciled);
   const c=transferCount(t), before=num(counts[t.from]), beforeKg=biomass[t.from];
   const w=transferMass(t,before>0 && beforeKg!==null ? beforeKg/before : 0);
-  const full=t.to!==OUT && t.fullTransfer===true;
+  const full=transferIsFull(t);
+  let invalid='';
+  if(!(before>0))invalid='в исходном бассейне нет рыбы';
+  else if(!(c>0))invalid='не указано количество';
+  else if(!full && c>before+0.01)invalid='количество партии больше остатка';
+  else if(!full && w.kg!==null && beforeKg!==null && w.kg>beforeKg+0.001)invalid='масса партии больше биомассы';
+  else if(t.to===OUT && w.kg!==null && beforeKg!==null && ((c>=before-0.000001)!==(w.kg>=beforeKg-0.000001)))invalid='количество и масса продажи противоречат полному или частичному выбытию';
+  if(invalid)return {count:c,kg:w.kg,estimated:w.estimated,full,before,beforeKg,adjustment:0,invalid};
   counts[t.from]=full ? 0 : Math.max(0,before-c);
   biomass[t.from]=full || counts[t.from]===0 ? 0 : (beforeKg!==null && w.kg!==null ? Math.max(0,beforeKg-w.kg) : null);
   if(t.to!==OUT && counts[t.to]!==undefined){
@@ -876,95 +830,87 @@ function applyHerdTransfer(t,counts,biomass,reconciled={}){
   if(reconciled[t.from]===t) delete reconciled[t.from];
   return {count:c,kg:w.kg,estimated:w.estimated,full,before,beforeKg,adjustment:full?c-before:0};
 }
-// До первой записи взвешенной пересадки сохраняем исторический учёт снимков.
-// Далее количество и массу ведём раздельно, от каждого измерения и движения.
+// Один хронологический расчёт для всех журналов. Старые снимки — отдельные
+// уточнения учёта, а не способ восстановить исходный остаток из конца дня.
+function historicalPools(data,pools){
+  const out=new Set(pools);
+  ['stocking','transfers','incidents'].forEach(k=>Object.values(data[k]||{}).forEach(r=>[r.pool,r.from,r.to].forEach(p=>{if(p && p!==OUT)out.add(p);} )));
+  ['population','naveski','mortality','feed'].forEach(k=>Object.values(data[k]||{}).forEach(r=>Object.keys(r.values||r.used||{}).forEach(p=>out.add(p))));
+  return [...out];
+}
 function buildHerdState(data=state,pools=POOLS){
-  const legacy=buildLegacyPopulation(data,pools);
-  const first=Object.values(data.transfers||{}).filter(t=>t.to!==OUT && num(t.transferKg)>0).map(t=>t.date).sort()[0];
-  const result={...legacy,byDate:{...legacy.byDate},openings:{},biomassByDate:{},weightRows:{},warnings:[],first};
+  pools=historicalPools(data,pools);
+  const dates=allDates(data), counts={},biomass={},weights={},locked={},started={};
+  pools.forEach(p=>{counts[p]=0;biomass[p]=0;weights[p]=null;started[p]=false;});
+  const result={dates,byDate:{},started,openings:{},biomassByDate:{},weightRows:{},warnings:[],movements:[],deaths:[],adjustments:[],first:dates[0],pools};
   pools.forEach(p=>result.weightRows[p]=[]);
-  if(!first) return result;
-  const raw=econRawWeightIndex(data,pools), snaps=populationSnapshots(data,pools);
-  const dates=[...new Set([...legacy.dates,...Object.values(data.naveski||{}).map(r=>r.date)])].filter(Boolean).sort();
-  result.dates=dates;
-  dates.filter(d=>d<first).forEach(d=>{result.byDate[d]=Object.fromEntries(pools.map(p=>[p,populationAt(legacy.byDate,legacy.dates,d,p)]));});
-  const counts={},biomass={},weights={};
-  const priorDate=dates.filter(d=>d<first).pop();
-  pools.forEach(p=>{
-    counts[p]=priorDate ? populationAt(legacy.byDate,legacy.dates,priorDate,p) : 0;
-    const prior=(raw[p]||[]).filter(w=>w.date<first).pop();
-    if(prior) result.weightRows[p].push({...prior});
-    weights[p]=prior ? prior.kg : null;
-    biomass[p]=counts[p]===0?0:(weights[p] ? counts[p]*weights[p] : null);
-  });
-  const inc=incidentValuesByDate(data);
-  dates.filter(d=>d>=first).forEach(date=>{
-    Object.values(data.stocking||{}).filter(r=>r.date===date && pools.includes(r.pool)).forEach(r=>{
+  const snaps=populationSnapshots(data,pools),inc=incidentValuesByDate(data);
+  const grouped=k=>{const o={};Object.values(data[k]||{}).forEach(r=>{if(r.date)(o[r.date]??=[]).push(r);});return o;};
+  const stocks=grouped('stocking'),navs=grouped('naveski');
+  const warn=(date,pool,code,text)=>result.warnings.push({date,pool,code,text});
+  dates.forEach(date=>{
+    const measured=new Set(), deadLeft={};
+    (stocks[date]||[]).forEach(r=>{
       const p=r.pool,n=num(r.count),kg=num(r.weight)>0?n*num(r.weight):null;
-      biomass[p]=kg!==null && (counts[p]===0 || biomass[p]!==null) ? (counts[p]===0?0:biomass[p])+kg : null;
-      counts[p]+=n;
-      if(counts[p]>0 && biomass[p]!==null) weights[p]=biomass[p]/counts[p];
+      biomass[p]=kg!==null && (counts[p]===0 || biomass[p]!==null)?num(biomass[p])+kg:null;
+      counts[p]+=n; started[p]=true;
+      if(kg!==null)measured.add(p);
     });
-    // Навески и отход дня относятся к состоянию до пересадок.
-    Object.values(data.naveski||{}).filter(r=>r.date===date).forEach(r=>pools.forEach(p=>{
-      if(num(r.values && r.values[p])>0){weights[p]=num(r.values[p]);biomass[p]=counts[p]*weights[p];}
+    (navs[date]||[]).forEach(r=>pools.forEach(p=>{
+      if(num(r.values?.[p])>0){weights[p]=num(r.values[p]);biomass[p]=counts[p]*weights[p];measured.add(p);}
     }));
-    pools.forEach(p=>{
-      const dead=num(data.mortality && data.mortality[date] && data.mortality[date].values && data.mortality[date].values[p])+num(inc[date] && inc[date][p]);
-      const old=counts[p]; counts[p]=Math.max(0,old-dead);
-      if(counts[p]===0) biomass[p]=0;
-      else if(biomass[p]!==null && old>0) biomass[p]*=counts[p]/old;
-    });
-    const transfers=orderedTransfers(data,date).filter(t=>pools.includes(t.from) && (t.to===OUT || pools.includes(t.to)));
+    prepareOpeningMeasurements(orderedTransfers(data,date),counts,biomass);
+    const removeDead=(p,n,phase)=>{
+      const take=Math.min(counts[p],n),w=counts[p]>0 && biomass[p]!==null?biomass[p]/counts[p]:null;
+      counts[p]-=take;biomass[p]=counts[p]===0?0:(w!==null?counts[p]*w:null);
+      if(take>0)result.deaths.push({date,pool:p,count:take,kg:w!==null?take*w:null,phase});
+      return n-take;
+    };
+    pools.forEach(p=>{deadLeft[p]=removeDead(p,num(data.mortality?.[date]?.values?.[p])+num(inc[date]?.[p]),'before');});
+    const transfers=orderedTransfers(data,date).filter(t=>t.from!==t.to && counts[t.from]!==undefined && (t.to===OUT||counts[t.to]!==undefined));
     prepareOpeningMeasurements(transfers,counts,biomass);
     const reconciled={};
-    // Если весь исходный остаток взвешен в нескольких партиях за день,
-    // сумма этих масс уточняет базу распределения затрат и для первых партий.
     pools.forEach(p=>{
       const end=transfers.findIndex(t=>t.from===p && t.fullTransfer===true && num(t.transferKg)>0);
-      if(end<0 || !(counts[p]>0)) return;
+      if(end<0 || !(counts[p]>0))return;
       let actual=0,known=true;
-      transfers.slice(0,end+1).forEach(t=>{
-        if(t.from!==p && t.to!==p) return;
-        const kg=t.to===OUT?num(t.saleKg):num(t.transferKg);
-        if(!(kg>0)){known=false;return;}
-        actual += t.from===p?kg:-kg;
-      });
-      if(known && actual>0){biomass[p]=actual;reconciled[p]=transfers[end];}
+      transfers.slice(0,end+1).forEach(t=>{if(t.from!==p&&t.to!==p)return;const kg=t.to===OUT?num(t.saleKg):num(t.transferKg);if(!(kg>0)){known=false;return;}actual+=t.from===p?kg:-kg;});
+      if(known&&actual>0){biomass[p]=actual;reconciled[p]=transfers[end];}
     });
     result.openings[date]={counts:{...counts},biomass:{...biomass},transfers,reconciled:{...reconciled}};
-    const measuredPools=new Set();
     transfers.forEach(t=>{
-      const movement=applyHerdTransfer(t,counts,biomass,reconciled);
-      if(num(t.transferKg)>0){measuredPools.add(t.from);measuredPools.add(t.to);}
-      if(movement.full && Math.abs(movement.adjustment)>0.01) result.warnings.push({date,pool:t.from,text:'Полная пересадка: уточнение численности '+(movement.adjustment>0?'+':'')+fmtN(movement.adjustment)+' шт.; это не отход'});
-      if(!movement.full && (movement.count>movement.before+0.01 || (movement.kg!==null && movement.beforeKg!==null && movement.kg>movement.beforeKg+0.001))) result.warnings.push({date,pool:t.from,text:'Партия больше расчётного остатка. Проверьте численность и навеску перед пересадкой'});
+      if(t.to!==OUT && counts[t.to]>0 && !(num(t.destinationWeight)>0))warn(date,t.to,'receiver-sample','Перед поступлением не записана свежая навеска принимающего бассейна; использована его последняя учётная масса');
+      const m=applyHerdTransfer(t,counts,biomass,reconciled);
+      result.movements.push({...m,date,record:t,from:t.from,to:t.to});
+      if(m.invalid){warn(date,t.from,'invalid-transfer','Пересадка или продажа не проведена в расчёте: '+m.invalid+'. Исходная запись сохранена');return;}
+      if(t.to!==OUT){if(num(t.weight)>0)measured.add(t.from);if(m.kg!==null)measured.add(t.to);}
+      if(num(t.transferKg)>0 || t.fullTransfer===true){locked[t.from]=true;if(t.to!==OUT)locked[t.to]=true;}
+      if(m.full && Math.abs(m.adjustment)>0.01)warn(date,t.from,'full-adjustment','Полная пересадка: уточнение численности '+(m.adjustment>0?'+':'')+fmtN(m.adjustment)+' шт.; это не отход');
     });
-    const snap=snaps[date];
     pools.forEach(p=>{
+      if(deadLeft[p]>0){const remaining=removeDead(p,deadLeft[p],'after');if(remaining>0.01)warn(date,p,'excess-deaths','Отход превышает доступную численность на '+fmtN(remaining)+' шт.; проверьте порядок событий');}
+      const snap=snaps[date];
       if(snap && snap[p]!==undefined && Math.abs(snap[p]-counts[p])>0.01){
-        if(measuredPools.has(p)) result.warnings.push({date,pool:p,text:'Остаток в старом дневном снимке отличается от пересадки по массе; на эту дату использован результат пересадки'});
-        else {
-          const w=counts[p]>0 && biomass[p]!==null ? biomass[p]/counts[p] : weights[p];
-          counts[p]=Math.max(0,snap[p]); biomass[p]=counts[p]===0?0:(w ? counts[p]*w : null);
+        const document=Object.values(data.population||{}).find(r=>r.date===date);
+        const explicit=document?.reconciliation===true;
+        const use=!locked[p]||explicit;
+        warn(date,p,'snapshot','Дневной остаток '+fmtN(snap[p])+' шт., по журналам '+fmtN(counts[p])+' шт. '+(use?'Сохранено отдельное историческое уточнение численности; рубли не списываются':'Старый снимок не заменяет движение по массе'));
+        if(use){
+          const old=counts[p],w=old>0&&biomass[p]!==null?biomass[p]/old:weights[p];
+          counts[p]=Math.max(0,snap[p]);biomass[p]=counts[p]===0?0:(w>0?counts[p]*w:null);
+          result.adjustments.push({date,pool:p,count:counts[p]-old});
         }
       }
-      if(counts[p]>0){
-        result.started[p]=true;
-        if(!(biomass[p]>0)) result.weightRows[p].push({date,kg:null,src:'нет достоверной массы'});
-        if(biomass[p]!==null && biomass[p]>0){
-          const w=biomass[p]/counts[p];
-          const prev=result.weightRows[p].at(-1);
-          const navToday=Object.values(data.naveski||{}).some(r=>r.date===date && num(r.values && r.values[p])>0);
-          if(!prev || Math.abs(prev.kg-w)>1e-12 || navToday || measuredPools.has(p)) result.weightRows[p].push({date,kg:w,src:navToday && !measuredPools.has(p)?'навеска':'учёт массы'});
-          weights[p]=w;
-        }
-      }
+      if(counts[p]>0){started[p]=true;if(biomass[p]>0)weights[p]=biomass[p]/counts[p];}
+      const prev=result.weightRows[p].at(-1),w=counts[p]>0?((biomass[p]>0)?biomass[p]/counts[p]:null):weights[p];
+      if(w!==null && (measured.has(p)||!prev||Math.abs(prev.kg-w)>1e-12))result.weightRows[p].push({date,kg:w,src:measured.has(p)?'замер / пересадка':'уточнение учёта'});
+      if(counts[p]>0&&biomass[p]===null)result.weightRows[p].push({date,kg:null,src:'нет достоверной массы'});
     });
-    result.byDate[date]={...counts}; result.biomassByDate[date]={...biomass};
+    result.byDate[date]={...counts};result.biomassByDate[date]={...biomass};
   });
   return result;
 }
+
 function herdState(data=state,pools=POOLS){
   return data===state && pools===POOLS ? econCached('herd',()=>buildHerdState(data,pools)) : buildHerdState(data,pools);
 }
@@ -992,37 +938,25 @@ function populationAt(byDate, dates, date, pool){
 // Прирост биомассы = остаток стада (шт.) × навеска (кг/рыбу) на каждую из
 // этих двух дат.
 function naveskaDatesForPool(p){
-  return Object.values(state.naveski)
-    .filter(r=> r.values && r.values[p]!==undefined && r.values[p]!==null && r.values[p]!=="")
-    .map(r=>r.date).sort();
+  return [...new Set((herdState().weightRows[p]||[]).filter(r=>r.kg>0 && r.src==='замер / пересадка').map(r=>r.date))].sort();
 }
-function lastAtOrBefore(sortedDates, target){
-  let res = null;
-  for(const d of sortedDates){ if(d<=target) res=d; else break; }
-  return res;
-}
-function computeFCRTable(fromDate, toDate){
-  const { byDate, dates } = buildPopulation();
+function lastAtOrBefore(sortedDates,target){let r=null;for(const d of sortedDates){if(d<=target)r=d;else break;}return r;}
+function computeFCRTable(fromDate,toDate){
+  const H=herdState();
   return POOLS.map(p=>{
-    const navDates = naveskaDatesForPool(p);
-    const startDate = fromDate ? lastAtOrBefore(navDates, fromDate) : navDates[0];
-    const endDate = toDate ? lastAtOrBefore(navDates, toDate) : navDates[navDates.length-1];
-    if(!startDate || !endDate || startDate === endDate){
-      return { pool:p, ok:false, reason: !navDates.length ? "нет замеров навески" : "недостаточно замеров за период" };
-    }
-    const naveskaStart = num(state.naveski[startDate].values[p]);
-    const naveskaEnd = num(state.naveski[endDate].values[p]);
-    const popStart = populationAt(byDate, dates, startDate, p);
-    const popEnd = populationAt(byDate, dates, endDate, p);
-    const biomassStart = popStart * naveskaStart;
-    const biomassEnd = popEnd * naveskaEnd;
-    const gain = biomassEnd - biomassStart;
-    let feed = 0;
-    Object.values(state.feed).forEach(r=>{
-      if(r.date > startDate && r.date <= endDate) feed += num(r.used && r.used[p]);
-    });
-    const fcr = gain>0 ? feed/gain : null;
-    return { pool:p, ok:true, startDate, endDate, naveskaStart, naveskaEnd, popStart, popEnd, biomassStart, biomassEnd, gain, feed, fcr };
+    const navDates=naveskaDatesForPool(p), startDate=fromDate?lastAtOrBefore(navDates,fromDate):navDates[0],endDate=toDate?lastAtOrBefore(navDates,toDate):navDates.at(-1);
+    if(!startDate||!endDate||startDate>=endDate)return {pool:p,ok:false,reason:navDates.length?'недостаточно замеров за период':'нет замеров навески'};
+    const within=r=>r.date>startDate&&r.date<=endDate;
+    if(H.adjustments.some(r=>r.pool===p&&within(r)) || H.movements.some(r=>(r.from===p||r.to===p)&&within(r)&&(r.invalid||Math.abs(r.adjustment)>0.01)))return {pool:p,ok:false,reason:'есть уточнения численности или спорные движения за период'};
+    const biomassStart=H.biomassByDate[startDate][p],biomassEnd=H.biomassByDate[endDate][p],popStart=H.byDate[startDate][p],popEnd=H.byDate[endDate][p];
+    let incoming=0,outgoing=0,stocked=0,dead=0,known=biomassStart!==null&&biomassEnd!==null;
+    H.movements.filter(within).forEach(m=>{if(m.from!==p&&m.to!==p)return;if(m.kg===null)known=false;else{if(m.from===p)outgoing+=m.kg;if(m.to===p)incoming+=m.kg;}});
+    H.deaths.filter(r=>r.pool===p&&within(r)).forEach(r=>{if(r.kg===null)known=false;else dead+=r.kg;});
+    Object.values(state.stocking||{}).filter(r=>r.pool===p&&within(r)).forEach(r=>{if(!(num(r.weight)>0))known=false;else stocked+=num(r.count)*num(r.weight);});
+    if(!known)return {pool:p,ok:false,reason:'нет массы части поступлений, выбытий или отхода'};
+    const gain=biomassEnd-biomassStart-incoming-stocked+outgoing+dead;
+    const feed=Object.values(state.feed||{}).filter(within).reduce((s,r)=>s+num(r.used?.[p]),0);
+    return {pool:p,ok:true,startDate,endDate,naveskaStart:popStart>0?biomassStart/popStart:0,naveskaEnd:popEnd>0?biomassEnd/popEnd:0,popStart,popEnd,biomassStart,biomassEnd,incoming,outgoing,stocked,dead,gain,feed,fcr:gain>1e-9?feed/gain:null};
   });
 }
 
@@ -1194,8 +1128,9 @@ function renderActive(){
   const navUsersBtn = document.getElementById("navUsersBtn");
   if(navUsersBtn) navUsersBtn.style.display = isAdmin() ? "" : "none";
   if(activeSection === "users" && !isAdmin()) activeSection = "dash";
+  syncPoolsFromPlot();
   const renderers = {
-    plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
+    dataTools: renderDataTools, plots: renderPlots, dash: renderDash, stocking: renderStocking, transfers: renderTransfers, mortality: renderMortality, incidents: renderIncidents,
     feed: renderFeed, naveski: renderNaveski, o2: renderO2, temp: renderTemp, treat: renderTreat, population: renderPopulation,
     summary: renderSummary, charts: renderCharts, catalog: renderCatalog, archive: renderArchive, users: renderUsers, help: renderHelp,
     plan: renderPlan, cost: renderCost, feeds: renderFeeds,
@@ -1214,6 +1149,69 @@ function renderActive(){
     main.innerHTML = renderers[activeSection] ? renderers[activeSection]() : "";
   }
   wireActiveSection();
+}
+
+function downloadFarmJSON(name,data){
+  const a=document.createElement('a'),url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function stableJSON(x){if(Array.isArray(x))return '['+x.map(stableJSON).join(',')+']';if(x&&typeof x==='object')return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+stableJSON(x[k])).join(',')+'}';return JSON.stringify(x);}
+let farmImport=null,farmImportStatus='',farmImportBusy=false;
+function renderDataTools(){
+  const h=herdState(),warnings=h.warnings.filter(w=>w.code!=='full-adjustment');
+  const noteRows=Object.entries(state.population||{}).filter(([,r])=>r.reviewNote).map(([id,r])=>({date:r.date,pool:'',text:r.reviewNote}));
+  return `${topbar('Проверка и перенос данных','Резервная копия, проверка расхождений и загрузка подготовленных записей')}
+  <details class="panel"><summary class="panel-head">Как связаны численность, масса и затраты</summary><div class="panel-body">
+  <p>Затраты бассейна = начальная стоимость рыбы + корм + кислород + прочие расходы + затраты поступивших партий − затраты пересаженных и проданных партий. Корм = чистый расход × цена выбранного корма на дату кормления; возврат второй раз не вычитается. Кислород — отдельная внесённая сумма. Общие расходы распределяются между выбранными занятыми бассейнами по их массе на дату расхода и входят в их себестоимость один раз.</p>
+  <p>Перед частичной пересадкой: масса исходного бассейна = численность до операции × свежая навеска. Переносимая доля затрат = взвешенная масса партии ÷ масса исходного бассейна. Численность партии = масса партии ÷ её навеска. У источника вычитаются эти численность, масса и затраты, у получателя прибавляются. Если получатель занят, его массу сначала уточняют по его свежей навеске. Средняя навеска после смешения = суммарная масса ÷ суммарная численность.</p>
+  <p>При полной пересадке источник становится пустым и передаёт 100% затрат, даже если новое число рыб отличается от старой оценки. Для нескольких взвешенных партий, которыми за день опустошён бассейн, базой служит их суммарная масса с учётом встречных поступлений. Каждая следующая операция использует остаток после предыдущей.</p>
+  <p>Продажа списывает затраты пропорционально килограммам. Частичный отход уменьшает количество и массу, сохраняя затраты на оставшейся рыбе. Если погиб весь остаток, сумма показывается отдельно как потери на эту дату. Уточнение исторической численности само по себе не является продажей или отходом и не списывает рубли. Если после такого уточнения бассейн пуст, его нераспределённая стоимость остаётся видна до выяснения причины.</p>
+  <p>Себестоимость 1 кг = затраты бассейна ÷ его биомасса. По участку = сумма затрат всех бассейнов ÷ сумма их масс, если массы известны у всех. При отсутствии цен видны только внесённые затраты, итог пока неполный. Проверка: все начисленные расходы = остаток затрат + себестоимость продаж + потери полностью погибшего стада + нераспределённые расходы.</p></div></details>
+  <div class="panel"><div class="panel-body"><button class="btn" id="farmBackup">Скачать резервную копию участка</button>
+  <p class="hint">Копия содержит журналы выбранного участка. Храните её у себя. Перед загрузкой исправлений прежние записи дополнительно сохраняются в архиве.</p>
+  <label>Файл подготовленных данных <input id="farmImportFile" type="file" accept=".json,application/json"></label>
+  <div id="farmImportPreview">${farmImport?`<p>Источник: ${esc(farmImport.source||'')} · участок: ${esc(farmImport.plotName||farmImport.plotId)} · записей: ${farmImport.operations.length}</p><p>${esc(farmImport.summary||'')}</p><button class="btn" id="farmImportApply" ${farmImportBusy?'disabled':''}>Применить проверенные записи</button>`:''}</div>
+  <p role="status" id="farmImportStatus">${esc(farmImportStatus)}</p></div></div>
+  <div class="panel"><div class="panel-head"><h2>Спорные записи и расхождения (${warnings.length+noteRows.length})</h2></div>
+  <div class="panel-body"><p>Исходные спорные записи сохранены. Старые дневные остатки отображаются как отдельные уточнения численности. После первой пересадки с записанной массой старые снимки больше не меняют остаток этих бассейнов. Отход снимается с доступной рыбы до пересадок; недостающая часть — после поступлений того же дня. Если время события неизвестно, нужна проверка журнала.</p>
+  <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Бассейн</th><th>Что проверить</th></tr></thead><tbody>${noteRows.concat(warnings).sort((a,b)=>b.date.localeCompare(a.date)).map(w=>`<tr><td>${fmtD(w.date)}</td><td>${poolLabel(w.pool)}</td><td>${esc(w.text)}</td></tr>`).join('')}</tbody></table></div></div></div>`;
+}
+function wireDataTools(){
+  document.getElementById('farmBackup')?.addEventListener('click',async()=>{
+    try{const collections={};for(const col of PLOT_SCOPED_COLLECTIONS)collections[col]=await Store.listCollection(pcol(col));
+      downloadFarmJSON('ardon-backup-'+currentPlotId+'-'+todayISO()+'.json',{version:1,plotId:currentPlotId,plot:currentPlot(),collections,exportedAt:new Date().toISOString()});
+    }catch(e){toast('Не удалось сохранить копию: '+e.message);}
+  });
+  document.getElementById('farmImportFile')?.addEventListener('change',async e=>{
+    try{const x=JSON.parse(await e.target.files[0].text());
+      if(x.version!==1 || x.plotId!==currentPlotId || !Array.isArray(x.operations))throw Error('Файл предназначен для другого участка или имеет неверный формат');
+      const seen=new Set();for(const op of x.operations){const key=op.collection+'/'+op.id;
+        if(!PLOT_SCOPED_COLLECTIONS.includes(op.collection)||typeof op.id!=='string'||!op.id||op.id.includes('/')||seen.has(key)||!op.after||typeof op.after!=='object'||Array.isArray(op.after)||!/^\d{4}-\d{2}-\d{2}$/.test(op.after.date))throw Error('Недопустимая или повторная запись: '+key);
+        seen.add(key);
+      }
+      farmImport=x;farmImportStatus='Файл прочитан. При сохранении будут проверены текущие значения каждой записи.';renderActive();
+    }catch(err){farmImport=null;farmImportStatus=err.message;renderActive();}
+  });
+  document.getElementById('farmImportApply')?.addEventListener('click',async()=>{
+    if(farmImportBusy||!farmImport||farmImport.plotId!==currentPlotId)return;
+    farmImportBusy=true;const batch=farmImport,plotId=currentPlotId;let done=0,skip=0;
+    try{
+      for(const op of batch.operations){
+        const col=plotColName(op.collection,plotId);
+        if(db){await db.runTransaction(async tx=>{
+          const ref=db.doc(col+'/'+op.id),snap=await tx.get(ref),before=snap.exists?snap.data():null;
+          if(stableJSON(before)===stableJSON(op.after)){skip++;return;}
+          if(stableJSON(before)!==stableJSON(op.before??null))throw Error('Запись изменилась после сверки: '+op.collection+' / '+op.id);
+          const audit=db.collection('archive').doc();
+          tx.set(audit,{section:op.collection,docId:op.id,date:op.after.date,action:'Импорт: '+(op.reason||batch.source||''),snapshot:before||{},archivedAt:Date.now(),plotId,plotName:batch.plotName||'',createdByImport:!before});
+          tx.set(ref,op.after);
+        });}else{throw Error('Нет связи с базой. Импорт не выполнен');}
+        done++;farmImportStatus='Обработано '+done+' из '+batch.operations.length+'. Уже совпадали: '+skip;
+        const status=document.getElementById('farmImportStatus');if(status)status.textContent=farmImportStatus;
+      }
+      farmImportStatus='Готово. Обработано '+done+' записей. Уже совпадали: '+skip+'. Прежние значения сохранены в архиве.';farmImport=null;
+    }catch(e){farmImportStatus='Остановлено после '+done+' записей: '+(e.code==='resource-exhausted'?'Исчерпан лимит Firebase. Повторите после восстановления лимита':e.message)+'. Повторная загрузка того же файла безопасна: совпадающие записи будут пропущены.';}
+    finally{farmImportBusy=false;renderActive();}
+  });
 }
 
 function renderPassword(){
@@ -1240,11 +1238,12 @@ function renderPassword(){
 }
 
 function topbar(title, sub, extra){
+  const unavailable=Object.keys(storeReadErrors).length>0;
   return `<div class="topbar">
     <div><h1>${title}</h1><div class="sub">${sub||""}</div></div>
     <div class="row" style="align-items:center; gap:10px;">
       ${extra||""}
-      <span class="status-pill ${dbAvailable?'ok':'off'}">${dbAvailable? '&#9679; синхронизировано' : '&#9679; локальный режим (без сохранения)'}</span>
+      <span class="status-pill ${dbAvailable&&!unavailable?'ok':'off'}">${unavailable?'Данные загружены не полностью — ошибка сервера':dbAvailable? '&#9679; подключено' : '&#9679; локальный режим (без сохранения)'}</span>
     </div>
   </div>`;
 }
@@ -1432,9 +1431,8 @@ function renderStocking(){
    ------------------------------------------------------------------- */
 
 function transferAvailable(date){
-  const opening=econTransferOpening(date);
-  opening.transfers.forEach(t=>applyHerdTransfer(t,opening.counts,opening.biomass,opening.reconciled));
-  return opening;
+  const P=herdState(),d=P.dates.filter(d=>d<=date).pop();
+  return {counts:d?{...P.byDate[d]}:Object.fromEntries(P.pools.map(p=>[p,0])),biomass:d?{...P.biomassByDate[d]}:Object.fromEntries(P.pools.map(p=>[p,0])),transfers:[],reconciled:{}};
 }
 function transferFromForm(form){
   const f=new FormData(form),to=f.get('to'),kg=Number(f.get('transferKg')),weight=Number(f.get('weight'));
@@ -1455,7 +1453,9 @@ function transferValidation(t){
   if(t.to===OUT){
     if(!(Number.isFinite(t.saleKg) && t.saleKg>0)) return 'Укажите общий вес проданной рыбы в килограммах';
     if(!(kg>0)) return 'Сначала внесите навеску исходного бассейна — она нужна для списания себестоимости';
-    return '';
+    if(t.count>n+0.01 || t.saleKg>kg+0.001) return 'Продажа превышает остаток рыбы или биомассы';
+    if((t.count>=n-0.000001)!==(t.saleKg>=kg-0.000001))return 'Количество и масса продажи должны одновременно соответствовать полной или частичной продаже';
+    return transferFutureValidation(t);
   }
   if(!(Number.isFinite(t.transferKg) && t.transferKg>0 && Number.isFinite(t.weight) && t.weight>0)) return 'Укажите взвешенную массу и свежую навеску исходного бассейна больше нуля';
   if(!t.fullTransfer){
@@ -1463,6 +1463,13 @@ function transferValidation(t){
     if(t.transferKg>=kg-0.000001 || t.count>=n-0.000001) return 'Партия достигает или превышает расчётный остаток. Проверьте навеску и численность; отметьте полную пересадку только если бассейн действительно опустеет';
   }
   if(a.counts[t.to]>0 && !(Number.isFinite(t.destinationWeight) && t.destinationWeight>0)) return 'Укажите свежую навеску принимающего бассейна перед пересадкой';
+  return transferFutureValidation(t);
+}
+function transferFutureValidation(t){
+  const prior=herdState(), next=buildHerdState({...state,transfers:{...state.transfers,__candidate:t}},POOLS);
+  const old=new Set(prior.movements.filter(m=>m.invalid).map(m=>m.record));
+  const bad=next.movements.find(m=>m.invalid && !old.has(m.record) && m.date>=t.date);
+  if(bad)return 'После этой записи операция '+bad.date+' станет невозможной: '+bad.invalid+'. Сначала уточните связанные записи';
   return '';
 }
 function updateTransferPreview(form){
@@ -1764,6 +1771,7 @@ function renderNaveski(){
   const editDate = renderNaveski._editDate || todayISO();
   const existing = state.naveski[editDate];
   const dateList = Object.values(state.naveski).sort((a,b)=>b.date.localeCompare(a.date));
+  const transferSamples=Object.values(state.transfers||{}).filter(t=>t.to!==OUT && (num(t.weight)>0||num(t.destinationWeight)>0)).sort((a,b)=>b.date.localeCompare(a.date)||num(b.createdAt)-num(a.createdAt));
   const fcrFrom = renderNaveski._fcrFrom || "";
   const fcrTo = renderNaveski._fcrTo || todayISO();
   const fcrRows = computeFCRTable(fcrFrom, fcrTo);
@@ -1773,6 +1781,8 @@ function renderNaveski(){
   const totalFcr = totalGain>0 ? totalFeed/totalGain : null;
   return `
   ${topbar("Навески", "Средняя навеска рыбы по бассейнам и кормовой коэффициент (корм / прирост биомассы) за период")}
+  <details class="panel"><summary class="panel-head">Навески перед пересадками (${transferSamples.length})</summary><div class="panel-body table-wrap"><table><thead><tr><th>Дата</th><th>Исходный бассейн</th><th>Навеска, кг</th><th>Принимающий бассейн</th><th>Его навеска до поступления, кг</th></tr></thead><tbody>${transferSamples.map(t=>`<tr><td>${fmtD(t.date)}</td><td>${poolLabel(t.from)}</td><td>${fmtN(t.weight,3)}</td><td>${poolLabel(t.to)}</td><td>${num(t.destinationWeight)>0?fmtN(t.destinationWeight,3):'не записана'}</td></tr>`).join('')}</tbody></table><p>Прирост для КК = конечная масса − начальная масса − зарыбление − входящие пересадки + исходящие пересадки + продажи + масса отхода. При спорных корректировках численности КК не рассчитывается.</p></div></details>
+
   <div class="panel">
     <div class="panel-head"><h2>Внести навеску за день</h2><span class="hint">повторное сохранение на ту же дату — обновляет запись</span></div>
     <div class="panel-body">
@@ -1801,7 +1811,7 @@ function renderNaveski(){
   <div class="panel">
     <div class="panel-head"><h2>Кормовой коэффициент за период, по бассейнам</h2></div>
     <div class="panel-body">
-      <div class="hint" style="margin-bottom:12px;">Для каждого бассейна берётся последний замер навески на начало и на конец периода (не позже выбранной даты). Прирост биомассы = остаток стада (шт.) × навеска (кг) на эти даты. Корм считается по этому же бассейну за дни между двумя замерами.</div>
+      <div class="hint" style="margin-bottom:12px;">Для каждого бассейна берётся последний замер навески на начало и на конец периода (не позже выбранной даты). Прирост = конечная масса − начальная масса − входящие пересадки − зарыбление + исходящие пересадки + продажи + масса отхода. Корм берётся за тот же интервал; при спорных уточнениях численности коэффициент не рассчитывается.</div>
       <form id="fcrForm">
         <div class="row" style="align-items:flex-end;">
           <div class="field"><label>С даты</label><input type="date" name="from" value="${esc(fcrFrom)}"></div>
@@ -2441,12 +2451,12 @@ function renderHelp(){
     <p>5. Раздел <b>«ЧП»</b> — для происшествий, из-за которых погибла рыба (авария, отключение электричества, замор и т.п.), отдельно от обычного ежедневного отхода. Укажите дату, бассейн, сколько погибло и опишите, что случилось. Это число сразу прибавляется к обычному отходу и автоматически учитывается в остатке стада, на дашборде, в сводке и на графиках — вносить его повторно в «Отход» не нужно.</p>
     <p>6. Раздел <b>«Навески»</b> — периодически (например, раз в 1–2 недели) взвешивайте рыбу и вносите среднюю навеску (кг на одну рыбу) по каждому бассейну. По этим замерам программа сама считает <b>кормовой коэффициент</b> за выбранный период отдельно для каждого бассейна: берётся последний замер навески на начало и на конец периода, прирост биомассы = остаток стада × навеска на эти даты, а корм суммируется за дни между замерами. Кормовой коэффициент = корм за период (кг) ÷ прирост биомассы (кг).</p>
     <p>7. Раздел <b>«Корма и нормы»</b> — справочник кормов производителей: таблица норм кормления (% от массы рыбы в сутки по навескам и температуре), ожидаемый кормовой коэффициент и цены по датам. Новый корм добавляется вставкой таблицы из Excel; новая цена — одной строкой «с даты». Старые цены остаются: по ним пересчитывается себестоимость прошлых дней.</p>
-    <p>8. В <b>«Кормлении»</b> в поле <b>«Расход корма (чистый), кг»</b> вносите сразу чистый расход. Возврат указывайте отдельно: он сохраняется в журнале и выгрузке, но не вычитается из расхода повторно. Например, при расходе 100 кг и возврате 10 кг в расчётах используются 100 кг. Под полями показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение внесённого чистого расхода от неё. Корм по бассейну можно сменить в списке; если не трогать — берётся корм, положенный по навеске.</p>
+    <p>8. В <b>«Кормлении»</b> в поле <b>«Расход корма (чистый), кг»</b> вносите сразу чистый расход. Возврат указывайте отдельно: он сохраняется в журнале и выгрузке, но не вычитается из расхода повторно. Например, при расходе 100 кг и возврате 10 кг в расчётах используются 100 кг. Под полями показывается норма на фактическое стадо (ожидаемая навеска × остаток × норма корма при температуре дня) и отклонение внесённого чистого расхода от неё. Выберите фактически использованный корм в списке. Если оставить поле пустым, масса сохранится, а стоимость останется неопределённой до выбора корма и внесения цены.</p>
     <p>9. <b>«Расчёт роста»</b> — план выращивания по бассейну или по всему участку : привес = навеска × норма корма ÷ кормовой коэффициент, отход — фактический процент хозяйства (или заданный вручную), температуры — по журналу «Температура». План фиксирует нормы и цены на момент создания; сравнение с фактом — по кормлению, взвешиваниям, численности, затратам и себестоимости 1 кг.</p>
     <p>10. <b>«Себестоимость»</b> — фактические затраты: малёк (стоимость партии при зарыблении), корм (внесённый чистый расход × цена выбранного корма на дату кормления), кислород и прочие затраты (внесённые вами суммы расходов). Возврат корма повторно не вычитается. Кислород не начисляется автоматически по корму: в блоке «Прочие затраты» выберите статью <b>«Кислород»</b>, дату, сумму и нужные бассейны. В итогах эта сумма учитывается один раз в колонке «Кислород».</p>
     <p>Для каждой записи расходов можно выбрать весь текущий участок, отдельные бассейны текущего участка или <b>«Бассейны разных участков»</b>. В последнем случае отметьте бассейны под названиями нужных участков: одна общая сумма распределяется между всеми отмеченными бассейнами, а каждый участок получает только свою долю. В журнале видны сумма всей записи и доля текущего участка. Удаление общей записи убирает её доли из всех выбранных участков.</p>
     <p>Сумма распределяется по биомассе выбранных бассейнов с рыбой на дату расхода. Если навески есть не у всех — по количеству рыб, с предупреждением. Пустые бассейны долю не получают. Каждая запись сохраняет свой набор бассейнов: новые расходы на Б1, Б2 и Б3 не меняют выбор бассейнов у прежних записей. При исправлении численности или навесок на дату расхода доли этой записи пересчитываются, в том числе между участками.</p>
-    <p>Внутри дня расходы начисляются до пересадок. Навеска при пересадке — свежая навеска исходного бассейна: биомасса перед операцией = количество рыб перед операцией × эта навеска. Новое измерение заменяет предыдущую оценку веса исходного бассейна. Для занятого принимающего бассейна вводится его свежая навеска; масса до приёма = его количество × его свежая навеска. Сами измерения не меняют накопленную сумму затрат. При пересадке переносится доля всех накопленных затрат: <b>затраты исходного бассейна × взвешенная масса партии ÷ биомасса перед этой пересадкой</b>. Если за день весь бассейн пересажен несколькими взвешенными партиями, сумма их масс уточняет биомассу перед первой пересадкой, и затраты между партиями делятся по фактическим килограммам. При полной пересадке переносятся все затраты, исходный бассейн обнуляется, а количество партии уточняется по массе и навеске. Это уточнение не является отходом. В принимающем бассейне сумма прибавляется к его прежним затратам, численность — на массу партии ÷ её навеску, биомасса — на взвешенную массу партии. Средняя навеска после смешивания равна общей биомассе ÷ общей численности; итог по участку от пересадки не меняется. В старых пересадках без взвешенной массы используется количество × навеска партии (либо навеска исходного бассейна), масса отмечается как расчётная; если навески нет вообще — сохраняется перенос по численности с предупреждением. Навески и отход одного дня учитываются перед пересадками, а пересадки — по порядку добавления. Общие расходы уже входят в суммы бассейнов — повторно прибавлять их нельзя. При продаже себестоимость списывается по проданному весу. При отходе затраты остаются на выжившей рыбе; если бассейн полностью опустел, остаток затрат показывается в списаниях.</p>
+    <p>Внутри дня расходы начисляются до пересадок. Навеска при пересадке — свежая навеска исходного бассейна: биомасса перед операцией = количество рыб перед операцией × эта навеска. Новое измерение заменяет предыдущую оценку веса исходного бассейна. Для занятого принимающего бассейна вводится его свежая навеска; масса до приёма = его количество × его свежая навеска. Сами измерения не меняют накопленную сумму затрат. При пересадке переносится доля всех накопленных затрат: <b>затраты исходного бассейна × взвешенная масса партии ÷ биомасса перед этой пересадкой</b>. Если за день весь бассейн пересажен несколькими взвешенными партиями, сумма их масс уточняет биомассу перед первой пересадкой, и затраты между партиями делятся по фактическим килограммам. При полной пересадке переносятся все затраты, исходный бассейн обнуляется, а количество партии уточняется по массе и навеске. Это уточнение не является отходом. В принимающем бассейне сумма прибавляется к его прежним затратам, численность — на массу партии ÷ её навеску, биомасса — на взвешенную массу партии. Средняя навеска после смешивания равна общей биомассе ÷ общей численности; итог по участку от пересадки не меняется. В старых пересадках без взвешенной массы используется количество × навеска партии (либо навеска исходного бассейна), масса отмечается как расчётная; если навески нет вообще — сохраняется перенос по численности с предупреждением. Навески учитываются перед операциями. Отход вычитается из доступной рыбы до пересадок; если рыба поступила в пустой бассейн в этот же день, его отход учитывается после поступлений. Неизвестное время событий отмечено в правилах раздела «Проверка данных». Пересадки идут по порядку добавления. Общие расходы уже входят в суммы бассейнов — повторно прибавлять их нельзя. При продаже себестоимость списывается по проданному весу. При отходе затраты остаются на выжившей рыбе; если бассейн полностью опустел, остаток затрат показывается в списаниях.</p>
     <p>Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним навескам. Выберите <b>«Себестоимость на дату»</b>: таблица всех бассейнов и накопленные списания покажут состояние на конец этого дня. В <b>«Истории себестоимости»</b> выберите начало периода и отдельный бассейн либо все бассейны участка. При исправлении исходных записей история пересчитывается. Пустые бассейны остаются видны с нулевым остатком, а руб/кг для них не рассчитываются. Строка «Проверка общей суммы» связывает все начисленные затраты с остатком на рыбе, продажами, списаниями и нераспределёнными суммами.</p>
     <h3>Что считается автоматически</h3>
     <p>— Остаток стада по каждому бассейну (зарыбление плюс пересадки минус накопленный отход, включая отход по ЧП) — отдельным разделом <b>«Численность стада»</b> с историей по дням, по аналогии с «Отходом».<br>
@@ -2473,6 +2483,7 @@ function renderHelp(){
    Wiring: form submits + delete/edit buttons for the active section
    ------------------------------------------------------------------- */
 function wireActiveSection(){
+  wireDataTools();
   const main = document.getElementById("main");
 
   if(!currentUser){
@@ -2637,8 +2648,8 @@ function wireActiveSection(){
       const used = {}, returned = {}, kinds = {};
       POOLS.forEach(p=>{
         used[p]=num(f.get("u_"+p)); returned[p]=num(f.get("r_"+p));
-        // корм по бассейну: выбранный вручную, иначе — положенный по навеске на эту дату
-        if(used[p] > 0){ const k = f.get("k_"+p) || econDefaultKind(p, date); if(k) kinds[p] = k; }
+        // фактический корм выбирается явно; рекомендация не становится историческим фактом
+        if(used[p] > 0){ const k = f.get("k_"+p); if(k) kinds[p] = k; }
       });
       const old = state.feed[date];
       await Store.setDoc(pcol("feed"), date, {date, used, returned, kinds});
@@ -3086,11 +3097,11 @@ function econKindOptions(includeInactive){
 // Средняя температура по месяцам — только из журнала «Температура» текущего
 // участка. Месяц без замеров берёт значение ближайшего месяца, где замеры есть;
 // если замеров нет совсем — температур нет (план попросит ввести их вручную).
-function econMonthlyTemps(){
-  return econCached("mtemps", ()=>{
+function econMonthlyTemps(at=todayISO()){
+  return econCached("mtemps|"+at, ()=>{
     const sums = Array(12).fill(0), cnt = Array(12).fill(0);
     Object.values(state.temperature||{}).forEach(d=>{
-      if(!d || !d.date) return;
+      if(!d || !d.date || d.date>at) return;
       const m = tempDayMean(d);
       if(m === null || m === undefined || Number.isNaN(m)) return;
       const k = Number(d.date.slice(5,7)) - 1;
@@ -3118,14 +3129,14 @@ function econTempFor(date, pool){
     const m = tempDayMean(doc);
     if(m !== null && m !== undefined && !Number.isNaN(m)) return m;
   }
-  const t = econMonthlyTemps().temps[Number(date.slice(5,7)) - 1];
+  const t = econMonthlyTemps(date).temps[Number(date.slice(5,7)) - 1];
   return (t === null || t === undefined) ? null : t;
 }
 // Фактический кормовой коэффициент хозяйства по всем навескам (корм ÷ прирост
 // биомассы) — используется, пока у корма не задан КК поставщика.
-function econFarmFCR(){
-  return econCached("farmfcr", ()=>{
-    const rows = computeFCRTable("", todayISO()).filter(r=> r.ok && r.gain > 0);
+function econFarmFCR(at=todayISO()){
+  return econCached("farmfcr|"+at, ()=>{
+    const rows = computeFCRTable("", at).filter(r=> r.ok);
     const feed = rows.reduce((a,r)=>a+r.feed,0), gain = rows.reduce((a,r)=>a+r.gain,0);
     return gain > 0 && feed > 0 ? feed/gain : null;
   });
@@ -3145,7 +3156,7 @@ function econFarmMortPct(pools){
     return fishDays > 0 ? dead/fishDays*100 : null;
   });
 }
-function econFcrFor(row){ return row && num(row.fcr) > 0 ? num(row.fcr) : econFarmFCR(); }
+function econFcrFor(row,at=todayISO()){ return row && num(row.fcr) > 0 ? num(row.fcr) : econFarmFCR(at); }
 
 // Последний известный вес рыбы в бассейне (кг) не позже даты:
 // навеска → вес при зарыблении → вес при пересадке в этот бассейн.
@@ -3197,7 +3208,7 @@ function econProjectedWeight(pool, date){
       const pick = econPickFeed(feeds, w);
       if(!pick) break;
       const T = econTempFor(d, pool);
-      const fcr = econFcrFor(pick.row);
+      const fcr = econFcrFor(pick.row,d);
       if(T === null || !(fcr > 0)) break; // без температуры или КК дорастить нельзя
       w += w*econRateAt(pick.feed, pick.row, T)/100/fcr;
     }
@@ -3255,26 +3266,11 @@ function econSaleWeight(t, averageKg){
 // Затраты дня начисляются до пересадок. Для распределения расходов и
 // переноса затрат используется одна и та же численность перед операциями.
 function econTransferOpening(date,data=state,pools=POOLS,population,weightIndex){
-  const P = population || (data===state ? econPopIndex() : buildPopulation(data,pools));
-  if(P.openings && P.openings[date]) return {transfers:P.openings[date].transfers,counts:{...P.openings[date].counts},biomass:{...P.openings[date].biomass},reconciled:{...P.openings[date].reconciled}};
-  if(P.first && date>=P.first){
-    const d=Object.keys(P.biomassByDate).filter(d=>d<=date).sort().pop();
-    if(d) return {transfers:[],counts:{...P.byDate[d]},biomass:{...P.biomassByDate[d]}};
-  }
-  const weightsByPool = weightIndex || (data===state ? econWeightIndex() : econBuildWeightIndex(data,pools));
-  const transfers = Object.values(data.transfers||{}).filter(t=>t.date===date && pools.includes(t.from) && (t.to===OUT || pools.includes(t.to)))
-    .sort((a,b)=>num(a.createdAt)-num(b.createdAt));
-  const counts = {}, biomass = {};
-  pools.forEach(p=> counts[p] = populationAt(P.byDate,P.dates,date,p));
-  transfers.forEach(t=>{ counts[t.from] += num(t.count); if(t.to!==OUT) counts[t.to] -= num(t.count); });
-  pools.forEach(p=>{
-    counts[p] = Math.max(0,counts[p]);
-    const weights = (weightsByPool[p]||[]).filter(w=>w.date<=date && !(w.date===date && (w.src==="пересадка" || w.src==="навеска перед пересадкой")));
-    const w = weights.length ? weights[weights.length-1] : null;
-    biomass[p] = counts[p]===0 ? 0 : (w ? counts[p]*w.kg : null);
-  });
-  prepareOpeningMeasurements(transfers,counts,biomass);
-  return {transfers,counts,biomass};
+  const P=population || (data===state?econPopIndex():buildPopulation(data,pools));
+  const o=P.openings[date];
+  if(o)return {transfers:o.transfers,counts:{...o.counts},biomass:{...o.biomass},reconciled:{...o.reconciled}};
+  const d=P.dates.filter(d=>d<=date).pop();
+  return {transfers:[],counts:d?{...P.byDate[d]}:Object.fromEntries(P.pools.map(p=>[p,0])),biomass:d?{...P.biomassByDate[d]}:Object.fromEntries(P.pools.map(p=>[p,0])),reconciled:{}};
 }
 function econExpenseRecords(){
   const local = Object.entries(state.expenses||{}).filter(([,e])=>!Array.isArray(e.targets) || !e.targets.length)
@@ -3344,6 +3340,7 @@ function econExpenseAllocation(e, opening){
 function econLedger(){
   return econCached("ledger", ()=>{
     const P = econPopIndex();
+    const POOLS = P.pools;
     const cats = ["fry","feed","o2","other"];
     const zero = ()=>({fry:0, feed:0, o2:0, other:0});
     const dateSet = new Set(P.dates);
@@ -3376,7 +3373,7 @@ function econLedger(){
           const net = Math.max(0, num(fd.used && fd.used[p]));
           if(!(net > 0)) return;
           let kind = fd.kinds && fd.kinds[p];
-          if(!kind){ kind = econDefaultKind(p, date); day[p].auto = true; issues.autoKind++; }
+          if(!kind){ kind = null; day[p].auto = true; issues.autoKind++; }
           const k = econParseKind(kind);
           const feed = k && state.feeds[k.feedId];
           const pr = feed ? econPriceAt(feed, k.fraction, date) : null;
@@ -3404,18 +3401,20 @@ function econLedger(){
         const c = transferCount(t);
         const before = counts[t.from];
         const isSale = t.to === OUT;
-        const full = !isSale && t.fullTransfer===true;
+        const full = transferIsFull(t);
         const avg = before > 0 && biomass[t.from] !== null ? biomass[t.from]/before : 0;
         const batch = transferMass(t,avg);
         const movedKg = batch.kg;
+        const movement=applyHerdTransfer(t,counts,biomass,reconciled);
+        if(movement.invalid){(isSale?issues.sales:issues.transfers).push({date,pool:t.from,text:movement.invalid+'; затраты по этой записи не перенесены'});return;}
         let share = 0;
-        if(full || (before>0 && c>=before && (isSale || !(num(t.transferKg)>0)))) share=1;
-        else if(movedKg!==null && biomass[t.from]>0) share=Math.min(1,movedKg/biomass[t.from]);
+        if(full) share=1;
+        else if(movedKg!==null && movement.beforeKg>0) share=Math.min(1,movedKg/movement.beforeKg);
         else if(!isSale && !(num(t.transferKg)>0)) {
           share=before>0?Math.min(1,c/before):0;
           issues.transfers.push({date,pool:t.from,text:'В старой пересадке нет данных для массы — затраты перенесены по численности'});
         } else (isSale?issues.sales:issues.transfers).push({date,pool:t.from,text:'Нет биомассы исходного бассейна для переноса затрат. Внесите навеску'});
-        if(!full && movedKg!==null && biomass[t.from]!==null && movedKg>biomass[t.from]+0.001) (isSale?issues.sales:issues.transfers).push({date,pool:t.from,text:'Масса партии больше расчётной биомассы — проверьте исходные данные'});
+        if(!full && movedKg!==null && movement.beforeKg!==null && movedKg>movement.beforeKg+0.001) (isSale?issues.sales:issues.transfers).push({date,pool:t.from,text:'Масса партии больше расчётной биомассы — проверьте исходные данные'});
         if(isSale) day[t.from].soldKg += movedKg || 0;
 
         let movedCost = 0;
@@ -3425,15 +3424,13 @@ function econLedger(){
           run[t.from][cat] -= moved;
           if(run[t.to]) run[t.to][cat] += moved; else if(isSale) sold[cat] += moved;
         });
-        applyHerdTransfer(t,counts,biomass,reconciled);
-
         if(isSale){ soldByPool[t.from] += movedCost; day[t.from].soldCost += movedCost; }
         movements.push({record:t,date,from:t.from,to:t.to,count:c,kg:movedKg,cost:movedCost,share,beforeKg:avg*before,estimated:batch.estimated,full,adjustment:full?c-before:0});
       });
       POOLS.forEach(p=>{
         const n = num(P.byDate[date] && P.byDate[date][p]);
         const tot = cats.reduce((s,c)=> s + run[p][c], 0);
-        if(!(n > 0) && tot > 0 && P.byDate[date]){
+        if(!(n > 0) && tot > 0 && P.byDate[date] && !P.adjustments.some(a=>a.date===date && a.pool===p) && P.deaths.some(d=>d.date===date && d.pool===p)){
           lostByPool[p] += tot; day[p].lostCost += tot;
           cats.forEach(c=>{ lost[c] += run[p][c]; run[p][c] = 0; });
         }
@@ -3496,7 +3493,7 @@ function econFactState(pools, date){
     const b = econBiomassAt(p,date);
     if(b!==null && b>0) biomass += b; else measured = false;
   });
-  return { n, biomass, wG: n > 0 ? biomass/n*1000 : null, cost, parts, costPerKg: biomass > 0 ? cost/biomass : null, measured };
+  return { n, biomass, wG: measured && n > 0 ? biomass/n*1000 : null, cost, parts, costPerKg: measured && biomass > 0 ? cost/biomass : null, measured };
 }
 // Затраты, понесённые за период (не зависят от пересадок).
 function econIncurred(pools, from, to){
@@ -4031,6 +4028,7 @@ function renderCost(){
     return { p, c, n, lw, biomass, perKg: biomass > 0 ? c.total/biomass : null };
   });
   const tot = rows.reduce((s,r)=>({ fry:s.fry+r.c.fry, feed:s.feed+r.c.feed, o2:s.o2+r.c.o2, other:s.other+r.c.other, total:s.total+r.c.total, n:s.n+r.n, biomass:s.biomass+r.biomass }), {fry:0,feed:0,o2:0,other:0,total:0,n:0,biomass:0});
+  const massComplete=rows.every(r=>!(r.n>0)||r.biomass!==null);
   const inc = econIncurred(POOLS, from, to);
   const accrued = econIncurred(POOLS,"",at).total + disposals.unallocated;
   const incByPool = POOLS.map(p=>({ p, ...econIncurred([p], from, to) }));
@@ -4042,12 +4040,14 @@ function renderCost(){
     return { pl, f };
   }).filter(x=> x.f);
   const issues = L.issues;
-  const noPriceKeys = Object.keys(issues.noPrice);
+  const missingPrices={};let missingKinds=0;
+  Object.entries(L.daily).filter(([d])=>d<=at).forEach(([,row])=>Object.values(row).forEach(r=>{if(r.feedKg>0&&r.price===null){const k=r.kind?econKindLabel(r.kind):'корм не выбран';missingPrices[k]=(missingPrices[k]||0)+r.feedKg;if(!r.kind)missingKinds++;}}));
+  const noPriceKeys = Object.keys(missingPrices);
   const alerts = [];
   if(!econAllFeeds().length) alerts.push(`<div class="alert warn">Справочник «Корма и нормы» пуст — корм в себестоимости считается по нулевой цене.</div>`);
-  noPriceKeys.forEach(k=> alerts.push(`<div class="alert warn">Нет цены для «${esc(k)}» на дату кормления — ${fmtN(issues.noPrice[k],1)} кг корма учтены по нулевой цене. Добавьте цену в «Корма и нормы» с более ранней датой.</div>`));
-  if(issues.noFryPrice.length) alerts.push(`<div class="alert warn">У ${issues.noFryPrice.length} записей зарыбления не указана цена малька — их стоимость не учтена. Укажите цену в разделе «Зарыбление».</div>`);
-  if(issues.autoKind) alerts.push(`<div class="alert good">В ${fmtN(issues.autoKind)} записях кормления (бассейн × день) корм не выбран вручную — взят корм по навеске из справочника.</div>`);
+  noPriceKeys.forEach(k=> alerts.push(`<div class="alert warn">Нет цены для «${esc(k)}» на дату кормления — ${fmtN(missingPrices[k],1)} кг корма учтены по нулевой цене. Добавьте цену в «Корма и нормы» с более ранней датой.</div>`));
+  if(issues.noFryPrice.filter(r=>r.date<=at).length) alerts.push(`<div class="alert warn">У ${issues.noFryPrice.filter(r=>r.date<=at).length} записей зарыбления не указана цена малька — их стоимость не учтена. Укажите цену в разделе «Зарыбление».</div>`);
+  if(missingKinds) alerts.push(`<div class="alert warn">Есть кормления без выбранного корма. Их масса сохранена, стоимость не определена. Выберите корм и внесите цену; автоматический подбор не меняет прошлые затраты.</div>`);
   issues.transfers.concat(econPopIndex().warnings||[]).filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}, ${poolLabel(x.pool)}: ${esc(x.text)}.</div>`));
   issues.sales.filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}, ${poolLabel(x.pool)}: ${esc(x.text)}.</div>`));
   issues.expenses.filter(x=>x.date<=at).forEach(x=>alerts.push(`<div class="alert warn">${fmtD(x.date)}: ${esc(x.text)}.</div>`));
@@ -4060,24 +4060,25 @@ function renderCost(){
       <button class="btn" type="submit">Показать</button>
     </form>
   </div></div>
-  ${alerts.length ? `<div class="alert-list" style="margin-bottom:16px;">${alerts.join("")}</div>` : ""}
+  ${alerts.length ? `<details class="panel"><summary class="panel-head">Требуют проверки: ${alerts.length}</summary><div class="panel-body">${alerts.join("")}</div></details>` : ""}
   <div class="grid cards">
-    <div class="card"><div class="label">Стоимость стада</div><div class="value">${fmtN(tot.total,0)}<small> руб</small></div><div class="delta">на ${fmtD(at)}</div></div>
-    <div class="card"><div class="label">Биомасса</div><div class="value">${fmtN(tot.biomass,0)}<small> кг</small></div><div class="delta">${fmtN(tot.n)} шт. · навески и масса пересадок</div></div>
-    <div class="card"><div class="label">Себестоимость 1 кг</div><div class="value">${tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}<small> руб</small></div><div class="delta">в среднем по участку</div></div>
+    <div class="card"><div class="label">Стоимость стада по внесённым затратам</div><div class="value">${fmtN(tot.total,0)}<small> руб</small></div><div class="delta">на ${fmtD(at)}</div></div>
+    <div class="card"><div class="label">Биомасса</div><div class="value">${massComplete?fmtN(tot.biomass,0):"нет полной массы"}<small> кг</small></div><div class="delta">${fmtN(tot.n)} шт. · навески и масса пересадок</div></div>
+    <div class="card"><div class="label">Себестоимость 1 кг</div><div class="value">${massComplete&&tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}<small> руб</small></div><div class="delta">в среднем по участку</div></div>
     <div class="card"><div class="label">Затраты за период</div><div class="value">${fmtN(inc.total,0)}<small> руб</small></div><div class="delta">${fmtD(from)} – ${fmtD(to)}</div></div>
   </div>
   <div class="panel">
     <div class="panel-head"><h2>Себестоимость по бассейнам на ${fmtD(at)}</h2><span class="hint">затраты переходят вместе с рыбой при пересадках</span></div>
     <div class="panel-body table-wrap"><table><thead><tr><th>Бассейн</th><th>Остаток, шт.</th><th>Навеска, кг</th><th>Биомасса, кг</th><th>Малёк</th><th>Корм</th><th>Кислород</th><th>Прочие</th><th>Итого, руб</th><th>Руб/кг</th></tr></thead><tbody>
-      ${rows.map(r=>`<tr><td>${poolLabel(r.p)}${r.n>0?'':' <span class="hint">нет рыбы</span>'}</td><td class="num">${fmtN(r.n)}</td><td class="num">${r.lw?fmtN(r.lw.kg,3)+` <span class="hint">${fmtD(r.lw.date)}</span>`:"—"}</td><td class="num">${fmtN(r.biomass,0)}</td>
+      ${rows.map(r=>`<tr><td>${poolLabel(r.p)}${r.n>0?'':' <span class="hint">нет рыбы</span>'}</td><td class="num">${fmtN(r.n)}</td><td class="num">${r.lw?fmtN(r.lw.kg,3)+` <span class="hint">${fmtD(r.lw.date)}</span>`:"—"}</td><td class="num">${r.biomass===null?"нет навески":fmtN(r.biomass,0)}</td>
         <td class="num">${fmtN(r.c.fry,0)}</td><td class="num">${fmtN(r.c.feed,0)}</td><td class="num">${fmtN(r.c.o2,0)}</td><td class="num">${fmtN(r.c.other,0)}</td><td class="num"><b>${fmtN(r.c.total,0)}</b></td><td class="num"><b>${r.perKg!==null?fmtN(r.perKg,1):"—"}</b></td></tr>`).join("")}
-      <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(tot.n)}</td><td></td><td class="num">${fmtN(tot.biomass,0)}</td><td class="num">${fmtN(tot.fry,0)}</td><td class="num">${fmtN(tot.feed,0)}</td><td class="num">${fmtN(tot.o2,0)}</td><td class="num">${fmtN(tot.other,0)}</td><td class="num">${fmtN(tot.total,0)}</td><td class="num">${tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}</td></tr>
+      <tr style="font-weight:600;"><td>Итого</td><td class="num">${fmtN(tot.n)}</td><td></td><td class="num">${massComplete?fmtN(tot.biomass,0):"нет полной массы"}</td><td class="num">${fmtN(tot.fry,0)}</td><td class="num">${fmtN(tot.feed,0)}</td><td class="num">${fmtN(tot.o2,0)}</td><td class="num">${fmtN(tot.other,0)}</td><td class="num">${fmtN(tot.total,0)}</td><td class="num">${massComplete&&tot.biomass>0?fmtN(tot.total/tot.biomass,1):"—"}</td></tr>
     </tbody></table>
     <div class="hint" style="margin-top:8px;">Накоплено по ${fmtD(at)} включительно: себестоимость проданной рыбы — ${fmtN(disposals.sold,2)} руб · списано по опустевшим бассейнам — ${fmtN(disposals.lost,2)} руб${disposals.unallocated?` · не распределено из-за отсутствия рыбы в выбранных бассейнах — ${fmtN(disposals.unallocated,2)} руб`:""}.</div>
     <div class="hint" style="margin-top:8px;">Общие расходы уже включены в суммы бассейнов. Итого по участку = сумма остатков затрат всех бассейнов; повторно прибавлять общие расходы не нужно. Пересадки меняют распределение затрат, но не итог по участку. Кислород учитывается только по внесённым суммам.</div></div>
     <div class="panel-body hint" style="padding-top:0;">Проверка общей суммы на ${fmtD(at)}: начислено ${fmtN(accrued,2)} руб = осталось на рыбе ${fmtN(tot.total,2)} + продажи ${fmtN(disposals.sold,2)} + списания по пустым бассейнам ${fmtN(disposals.lost,2)} + не распределено ${fmtN(disposals.unallocated,2)} руб.</div>
   </div>
+  <div class="alert warn" ${noPriceKeys.length || issues.noFryPrice.some(r=>r.date<=at)?'': 'hidden'}>Оценка затрат неполная: заполните корм, его цены и стоимость зарыбления. Нулевая внесённая сумма не означает отсутствие реальных расходов.</div>
   ${renderCostHistory(at)}
   <div class="panel">
     <div class="panel-head"><h2>Факт против плана на ${fmtD(at)}</h2></div>
@@ -4139,7 +4140,7 @@ function renderFeedNormBlock(date, existing){
     return `<tr data-norm-row="${esc(p)}" data-norm-kg="${nm ? nm.kg : ""}">
       <td>${poolLabel(p)}${econPopAt(p,date)>0?'':' <span class="hint">нет рыбы</span>'}</td>
       <td style="text-align:left;"><select name="k_${esc(p)}" data-kind-pool="${esc(p)}" style="min-width:210px;">
-        <option value="">${def ? "по навеске: "+esc(econKindLabel(def)) : "— не выбран —"}</option>
+        <option value="">— корм не выбран, стоимость не определена —</option>
         ${extra.concat(opts).map(o=>`<option value="${esc(o.value)}" ${saved===o.value?"selected":""}>${esc(o.label)}</option>`).join("")}
       </select></td>
       <td class="num">${nm ? fmtN(nm.wG, nm.wG<10?2:0)+` <span class="hint" title="последний замер ${fmtDRaw(nm.pw.measuredDate)}: ${fmtN(nm.pw.measuredKg*1000, 1)} г (${nm.pw.src})">${nm.pw.days?"расч.":"замер"}</span>` : "—"}</td>
