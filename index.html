@@ -776,6 +776,7 @@ function buildLegacyPopulation(data=state,pools=POOLS){ return buildHerdState(da
 // Масса партии хранится независимо от оценённого числа рыб. Дробная оценка
 // сохраняется в расчёте; округление до целых применяется только на экране.
 function transferIsFull(t){
+  if(t.to===OUT)return t.fullSale===true;
   return t.to!==OUT && (t.fullTransfer===true || (t.fullTransfer===undefined && /^из\s*(?:\d+|ЗБ)\s*в\s*(?:\d+|ЗБ)\s*\(?все(?:\s|\)|$)/i.test(String(t.comment||''))));
 }
 function transferCount(t){
@@ -809,15 +810,17 @@ function prepareOpeningMeasurements(transfers,counts,biomass){
 }
 function applyHerdTransfer(t,counts,biomass,reconciled={}){
   prepareTransferMeasurements(t,counts,biomass,reconciled);
-  const c=transferCount(t), before=num(counts[t.from]), beforeKg=biomass[t.from];
-  const w=transferMass(t,before>0 && beforeKg!==null ? beforeKg/before : 0);
+  const before=num(counts[t.from]), beforeKg=biomass[t.from];
+  const fullSale=t.to===OUT && t.fullSale===true;
+  const c=fullSale?before:transferCount(t);
+  const w=fullSale && !(num(t.saleKg)>0) ? {kg:beforeKg??null,estimated:true} : transferMass(t,before>0 && beforeKg!==null ? beforeKg/before : 0);
   const full=transferIsFull(t);
   let invalid='';
   if(!(before>0))invalid='в исходном бассейне нет рыбы';
   else if(!(c>0))invalid='не указано количество';
   else if(!full && c>before+0.01)invalid='количество партии больше остатка';
   else if(!full && w.kg!==null && beforeKg!==null && w.kg>beforeKg+0.001)invalid='масса партии больше биомассы';
-  else if(t.to===OUT && w.kg!==null && beforeKg!==null && ((c>=before-0.000001)!==(w.kg>=beforeKg-0.000001)))invalid='количество и масса продажи противоречат полному или частичному выбытию';
+  else if(t.to===OUT && !full && w.kg!==null && beforeKg!==null && ((c>=before-0.000001)!==(w.kg>=beforeKg-0.000001)))invalid='количество и масса продажи противоречат полному или частичному выбытию';
   if(invalid)return {count:c,kg:w.kg,estimated:w.estimated,full,before,beforeKg,adjustment:0,invalid};
   counts[t.from]=full ? 0 : Math.max(0,before-c);
   biomass[t.from]=full || counts[t.from]===0 ? 0 : (beforeKg!==null && w.kg!==null ? Math.max(0,beforeKg-w.kg) : null);
@@ -884,7 +887,7 @@ function buildHerdState(data=state,pools=POOLS){
       result.movements.push({...m,date,record:t,from:t.from,to:t.to});
       if(m.invalid){warn(date,t.from,'invalid-transfer','Пересадка или продажа не проведена в расчёте: '+m.invalid+'. Исходная запись сохранена');return;}
       if(t.to!==OUT){if(num(t.weight)>0)measured.add(t.from);if(m.kg!==null)measured.add(t.to);}
-      if(num(t.transferKg)>0 || t.fullTransfer===true){locked[t.from]=true;if(t.to!==OUT)locked[t.to]=true;}
+      if(num(t.transferKg)>0 || t.fullTransfer===true || (t.to===OUT && t.fullSale===true)){locked[t.from]=true;if(t.to!==OUT)locked[t.to]=true;}
       if(m.full && Math.abs(m.adjustment)>0.01)warn(date,t.from,'full-adjustment','Полная пересадка: уточнение численности '+(m.adjustment>0?'+':'')+fmtN(m.adjustment)+' шт.; это не отход');
     });
     pools.forEach(p=>{
@@ -1062,7 +1065,7 @@ function formatSnapshot(col, data){
     return `${poolLabelRaw(data.pool)} · ${fmtN(data.count)} шт.${data.weight? " · навеска "+fmtN(data.weight,3)+" кг":""}${data.comment? " · "+data.comment:""}`;
   }
   if(col === "transfers"){
-    return `${poolLabelRaw(data.from)} → ${toPoolLabelRaw(data.to)} · ${fmtN(data.count)} шт.${data.comment? " · "+data.comment:""}`;
+    return `${poolLabelRaw(data.from)} → ${toPoolLabelRaw(data.to)} · ${data.fullSale===true?'вся рыба':fmtN(data.count)+' шт.'}${data.comment? " · "+data.comment:""}`;
   }
   if(col === "incidents"){
     return `${poolLabelRaw(data.pool)} · погибло ${fmtN(data.count)} шт. · ${data.description||""}${data.comment? " · "+data.comment:""}`;
@@ -1165,6 +1168,7 @@ function renderDataTools(){
   <p>Перед частичной пересадкой: масса исходного бассейна = численность до операции × свежая навеска. Переносимая доля затрат = взвешенная масса партии ÷ масса исходного бассейна. Численность партии = масса партии ÷ её навеска. У источника вычитаются эти численность, масса и затраты, у получателя прибавляются. Если получатель занят, его массу сначала уточняют по его свежей навеске. Средняя навеска после смешения = суммарная масса ÷ суммарная численность.</p>
   <p>При полной пересадке источник становится пустым и передаёт 100% затрат, даже если новое число рыб отличается от старой оценки. Для нескольких взвешенных партий, которыми за день опустошён бассейн, базой служит их суммарная масса с учётом встречных поступлений. Каждая следующая операция использует остаток после предыдущей.</p>
   <p>Продажа списывает затраты пропорционально килограммам. Частичный отход уменьшает количество и массу, сохраняя затраты на оставшейся рыбе. Если погиб весь остаток, сумма показывается отдельно как потери на эту дату. Уточнение исторической численности само по себе не является продажей или отходом и не списывает рубли. Если после такого уточнения бассейн пуст, его нераспределённая стоимость остаётся видна до выяснения причины.</p>
+  <p>Если продана вся рыба, отметка «Продана вся рыба» обнуляет численность и биомассу бассейна и списывает 100% его накопленных затрат. При неизвестном весе продажи поле оставляют пустым: масса по последней навеске показывается как расчётная. Отсутствие взвешенного веса не мешает списать стоимость всего проданного остатка.</p>
   <p>Себестоимость 1 кг = затраты бассейна ÷ его биомасса. По участку = сумма затрат всех бассейнов ÷ сумма их масс, если массы известны у всех. При отсутствии цен видны только внесённые затраты, итог пока неполный. Проверка: все начисленные расходы = остаток затрат + себестоимость продаж + потери полностью погибшего стада + нераспределённые расходы.</p></div></details>
   <div class="panel"><div class="panel-body"><button class="btn" id="farmBackup">Скачать резервную копию участка</button>
   <p class="hint">Копия содержит журналы выбранного участка. Храните её у себя. Перед загрузкой исправлений прежние записи дополнительно сохраняются в архиве.</p>
@@ -1436,16 +1440,21 @@ function transferAvailable(date){
 }
 function transferFromForm(form){
   const f=new FormData(form),to=f.get('to'),kg=Number(f.get('transferKg')),weight=Number(f.get('weight'));
+  const fullSale=to===OUT && f.get('fullSale')==='on';
   return {date:f.get('date'),from:f.get('from'),to,weight:weight>0?weight:null,
-    count:to!==OUT && kg>0 && weight>0 ? kg/weight : Number(f.get('count')),
+    count:fullSale?null:(to!==OUT && kg>0 && weight>0 ? kg/weight : Number(f.get('count'))),
     destinationWeight:to!==OUT && Number(f.get('destinationWeight'))>0?Number(f.get('destinationWeight')):null,
     transferKg:to!==OUT?kg:null,fullTransfer:to!==OUT && f.get('fullTransfer')==='on',
-    saleKg:to===OUT?Number(f.get('saleKg')):null,createdAt:Date.now(),comment:f.get('comment')||''};
+    fullSale,saleKg:to===OUT && Number(f.get('saleKg'))>0?Number(f.get('saleKg')):null,createdAt:Date.now(),comment:f.get('comment')||''};
 }
 function transferValidation(t){
   if(!t.date || !POOLS.includes(t.from) || (t.to!==OUT && !POOLS.includes(t.to))) return 'Укажите дату и бассейны';
   if(t.from===t.to) return '«Из» и «в» не могут совпадать';
-  if(!(Number.isFinite(t.count) && t.count>0)) return 'Укажите массу и навеску больше нуля';
+  if(t.to===OUT && t.fullSale===true){
+    if(t.saleKg!=null && !(Number.isFinite(t.saleKg) && t.saleKg>0))return 'Укажите положительный вес продажи или оставьте его пустым';
+    return transferFutureValidation(t);
+  }
+  if(!(t.to===OUT && t.fullSale===true) && !(Number.isFinite(t.count) && t.count>0)) return 'Укажите массу и навеску больше нуля';
   const a=transferAvailable(t.date);
   prepareTransferMeasurements(t,a.counts,a.biomass);
   const n=a.counts[t.from],kg=a.biomass[t.from];
@@ -1474,12 +1483,15 @@ function transferFutureValidation(t){
 }
 function updateTransferPreview(form){
   const sale=form.elements.to.value===OUT;
+  const fullSale=sale && form.elements.fullSale.checked;
   document.getElementById('saleFields').hidden=!sale;
   document.getElementById('transferMassFields').hidden=sale;
-  form.elements.saleKg.disabled=!sale;form.elements.saleKg.required=sale;
+  form.elements.fullSale.disabled=!sale;
+  form.elements.saleKg.disabled=!sale;form.elements.saleKg.required=sale&&!fullSale;
   form.elements.transferKg.disabled=sale;form.elements.transferKg.required=!sale;
   form.elements.fullTransfer.disabled=sale;
-  form.elements.weight.required=!sale;form.elements.count.readOnly=!sale;
+  form.elements.weight.required=!sale;form.elements.weight.disabled=fullSale;
+  form.elements.count.readOnly=!sale||fullSale;form.elements.count.disabled=fullSale;form.elements.count.required=!fullSale;
   document.getElementById('transferSubmit').textContent=sale?'Добавить продажу':'Добавить пересадку';
   const date=form.elements.date.value,from=form.elements.from.value,to=form.elements.to.value;
   const sourceKey=date+'|'+from, destinationKey=date+'|'+to;
@@ -1494,7 +1506,9 @@ function updateTransferPreview(form){
   const t=transferFromForm(form);
   if(!sale) form.elements.count.value=t.transferKg>0 && t.weight>0 ? String(Math.round(t.count*100)/100) : '';
   prepareTransferMeasurements(t,a.counts,a.biomass);
-  const n=a.counts[t.from],kg=a.biomass[t.from];
+  const candidate=fullSale?buildHerdState({...state,transfers:{...state.transfers,__candidate:t}},POOLS).movements.find(m=>m.record===t):null;
+  const n=candidate?candidate.before:a.counts[t.from],kg=candidate?candidate.beforeKg:a.biomass[t.from];
+  if(fullSale)form.elements.count.value=n>0?String(Math.round(n*100)/100):'';
   let text=!sale && !(t.weight>0) ? 'Введите свежую навеску исходного бассейна для расчёта биомассы и доли затрат. ' : 'Перед операцией: '+fmtN(n)+' шт., '+(kg!==null?fmtN(kg,3)+' кг':'нет навески')+'. ';
   if(!sale && t.transferKg>0 && t.weight>0 && t.from!==t.to){
     const error=transferValidation(t);
@@ -1506,6 +1520,10 @@ function updateTransferPreview(form){
       text+='Перенос затрат: '+(t.fullTransfer?'100':fmtN(t.transferKg/beforeKg*100,2))+'%. После: '+poolLabelRaw(t.from)+' — '+fmtN(a.counts[t.from])+' шт., '+fmtN(a.biomass[t.from],3)+' кг; '+poolLabelRaw(t.to)+' — '+fmtN(a.counts[t.to])+' шт., '+fmtN(a.biomass[t.to],3)+' кг.';
       if(t.fullTransfer) text+=' Уточнение численности: '+(adjustment>0?'+':'')+fmtN(adjustment)+' шт. Все затраты сохраняются; это не отход.';
     }
+  }
+  if(fullSale){
+    const error=transferValidation(t);
+    text+=error || 'Продажа всей рыбы: остаток станет 0 шт. и 0 кг, спишется 100% накопленной себестоимости. '+(!(t.saleKg>0)?'Взвешенный вес не указан; масса будет показана как расчётная, если известна навеска.':'');
   }
   document.getElementById('transferPreview').textContent=text;
 }
@@ -1540,8 +1558,9 @@ function renderTransfers(){
         </div>
         <div id="transferPreview" class="hint" aria-live="polite" style="margin-bottom:12px;"></div>
         <div id="saleFields" hidden>
+          <label style="display:flex;gap:8px;align-items:center;margin:12px 0;"><input id="fullSale" type="checkbox" name="fullSale" style="width:auto;">Продана вся рыба — бассейн станет пустым</label>
           <div class="field"><label for="saleKg">Общий вес проданной рыбы, кг</label><input id="saleKg" name="saleKg" type="number" min="0.001" step="0.001" disabled></div>
-          <div class="hint" style="margin-bottom:12px;">Списывается себестоимость проданного веса. Биомасса до продажи определяется по численности и последней навеске бассейна. Отход вносите в «Отход» или «ЧП».</div>
+          <div class="hint" style="margin-bottom:12px;">При частичной продаже списывается себестоимость проданного веса. При продаже всей рыбы списываются весь остаток и 100% его себестоимости. Если взвешенный вес полной продажи неизвестен, оставьте поле пустым: масса будет отмечена как расчётная. Отход вносите в «Отход» или «ЧП».</div>
         </div>
         <button class="btn" type="submit" id="transferSubmit">Добавить пересадку</button>
       </form>
@@ -1550,15 +1569,15 @@ function renderTransfers(){
   <div class="panel">
     <div class="panel-head"><h2>История пересадок</h2><div class="row" style="gap:10px; align-items:center;"><span class="hint">${rows.length} записей</span>${exportButton("transfers")}</div></div>
     <div class="panel-body table-wrap">
-      <table><thead><tr><th>Дата</th><th>Откуда</th><th>Куда</th><th>Кол-во, шт.</th><th>Навеска исходного, кг</th><th>Навеска принимающего до пересадки, кг</th><th>Масса партии, кг</th><th>Полная пересадка</th><th>Уточнение численности, шт.</th><th>Комментарий</th><th></th></tr></thead>
+      <table><thead><tr><th>Дата</th><th>Откуда</th><th>Куда</th><th>Кол-во, шт.</th><th>Навеска исходного, кг</th><th>Навеска принимающего до пересадки, кг</th><th>Масса партии, кг</th><th>Весь бассейн</th><th>Уточнение численности, шт.</th><th>Комментарий</th><th></th></tr></thead>
       <tbody>${rows.length? rows.map(([id,r])=>`
         <tr>
           <td>${fmtD(r.date)}</td><td>${poolLabel(r.from)}</td><td>${toPoolLabel(r.to)}</td>
-          <td class="num">${fmtN(transferCount(r))}${num(r.transferKg)>0?' <span class="hint">оценка</span>':''}</td>
+          <td class="num">${(()=>{const m=movements.find(m=>m.record===r);return r.fullSale===true?(m?fmtN(m.count)+' <span class="hint">весь остаток</span>':'—'):fmtN(transferCount(r))+(num(r.transferKg)>0?' <span class="hint">оценка</span>':'');})()}</td>
           <td class="num">${r.weight?fmtN(r.weight,3):"—"}</td>
           <td class="num">${r.destinationWeight?fmtN(r.destinationWeight,3):"—"}</td>
           <td class="num">${(()=>{ const m=movements.find(m=>m.record===r),lw=econLastWeight(r.from,r.date); const w=m || transferMass(r,lw?lw.kg:0); return w.kg!==null ? fmtN(w.kg,3)+(w.estimated?' <span class="hint">расч.</span>':' <span class="hint">взвешено</span>') : "—"; })()}</td>
-          <td>${r.fullTransfer===true?'да':'—'}</td>
+          <td>${r.fullSale===true?'вся рыба продана':r.fullTransfer===true?'да':'—'}</td>
           <td>${(()=>{const m=movements.find(m=>m.record===r);return m&&m.full?(m.adjustment>0?'+':'')+fmtN(m.adjustment):'—';})()}</td>
           <td style="text-align:left; white-space:normal;">${esc(r.comment||"")}</td>
           <td><button class="btn danger" data-del="transfers:${esc(id)}">удалить</button></td>
@@ -1625,7 +1644,7 @@ function renderPopulation(){
   const prevDate = dates.length>1 ? dates[dates.length-2] : null;
   const dateList = [...dates].reverse();
   return `
-  ${topbar("Численность стада", "Остаток рыбы по бассейнам, в штуках — по фактическим данным учёта; за дни после последнего факта считается по зарыблению, пересадкам и отходу (включая ЧП)", exportButton("population"))}
+  ${topbar("Численность стада", "Расчёт по зарыблению, пересадкам, продажам и отходу. Расхождения с дневными остатками из файла видны в разделе «Проверка данных».", exportButton("population"))}
   <div class="grid cards">
     <div class="card"><div class="label">Стадо, всего</div><div class="value">${fmtN(totalPop)}<small> шт.</small></div><div class="delta">${activePools} бассейнов зарыблено</div></div>
   </div>
@@ -2458,6 +2477,7 @@ function renderHelp(){
     <p>Сумма распределяется по биомассе выбранных бассейнов с рыбой на дату расхода. Если навески есть не у всех — по количеству рыб, с предупреждением. Пустые бассейны долю не получают. Каждая запись сохраняет свой набор бассейнов: новые расходы на Б1, Б2 и Б3 не меняют выбор бассейнов у прежних записей. При исправлении численности или навесок на дату расхода доли этой записи пересчитываются, в том числе между участками.</p>
     <p>Внутри дня расходы начисляются до пересадок. Навеска при пересадке — свежая навеска исходного бассейна: биомасса перед операцией = количество рыб перед операцией × эта навеска. Новое измерение заменяет предыдущую оценку веса исходного бассейна. Для занятого принимающего бассейна вводится его свежая навеска; масса до приёма = его количество × его свежая навеска. Сами измерения не меняют накопленную сумму затрат. При пересадке переносится доля всех накопленных затрат: <b>затраты исходного бассейна × взвешенная масса партии ÷ биомасса перед этой пересадкой</b>. Если за день весь бассейн пересажен несколькими взвешенными партиями, сумма их масс уточняет биомассу перед первой пересадкой, и затраты между партиями делятся по фактическим килограммам. При полной пересадке переносятся все затраты, исходный бассейн обнуляется, а количество партии уточняется по массе и навеске. Это уточнение не является отходом. В принимающем бассейне сумма прибавляется к его прежним затратам, численность — на массу партии ÷ её навеску, биомасса — на взвешенную массу партии. Средняя навеска после смешивания равна общей биомассе ÷ общей численности; итог по участку от пересадки не меняется. В старых пересадках без взвешенной массы используется количество × навеска партии (либо навеска исходного бассейна), масса отмечается как расчётная; если навески нет вообще — сохраняется перенос по численности с предупреждением. Навески учитываются перед операциями. Отход вычитается из доступной рыбы до пересадок; если рыба поступила в пустой бассейн в этот же день, его отход учитывается после поступлений. Неизвестное время событий отмечено в правилах раздела «Проверка данных». Пересадки идут по порядку добавления. Общие расходы уже входят в суммы бассейнов — повторно прибавлять их нельзя. При продаже себестоимость списывается по проданному весу. При отходе затраты остаются на выжившей рыбе; если бассейн полностью опустел, остаток затрат показывается в списаниях.</p>
     <p>Себестоимость 1 кг — накопленные затраты на оставшуюся рыбу, разделённые на её биомассу по последним навескам. Выберите <b>«Себестоимость на дату»</b>: таблица всех бассейнов и накопленные списания покажут состояние на конец этого дня. В <b>«Истории себестоимости»</b> выберите начало периода и отдельный бассейн либо все бассейны участка. При исправлении исходных записей история пересчитывается. Пустые бассейны остаются видны с нулевым остатком, а руб/кг для них не рассчитываются. Строка «Проверка общей суммы» связывает все начисленные затраты с остатком на рыбе, продажами, списаниями и нераспределёнными суммами.</p>
+    <p>Для продажи всего остатка в разделе «Пересадки» выберите «Продажа» и отметьте «Продана вся рыба». Бассейн станет пустым, 100% его затрат попадут в себестоимость продаж на выбранную дату. Взвешенную массу можно оставить пустой, если она неизвестна: расчётная масса будет отдельно помечена. Повторная продажа пустого бассейна не допускается.</p>
     <h3>Что считается автоматически</h3>
     <p>— Остаток стада по каждому бассейну (зарыбление плюс пересадки минус накопленный отход, включая отход по ЧП) — отдельным разделом <b>«Численность стада»</b> с историей по дням, по аналогии с «Отходом».<br>
     — Итоги по кормлению и отходу за день (журнал «Отход» + «ЧП» вместе).<br>
@@ -3398,15 +3418,12 @@ function econLedger(){
         if(!run[t.from]) return;
         if(t.to !== OUT && !run[t.to]) return;
         prepareTransferMeasurements(t,counts,biomass,reconciled);
-        const c = transferCount(t);
         const before = counts[t.from];
         const isSale = t.to === OUT;
         const full = transferIsFull(t);
-        const avg = before > 0 && biomass[t.from] !== null ? biomass[t.from]/before : 0;
-        const batch = transferMass(t,avg);
-        const movedKg = batch.kg;
         const movement=applyHerdTransfer(t,counts,biomass,reconciled);
         if(movement.invalid){(isSale?issues.sales:issues.transfers).push({date,pool:t.from,text:movement.invalid+'; затраты по этой записи не перенесены'});return;}
+        const c=movement.count,movedKg=movement.kg;
         let share = 0;
         if(full) share=1;
         else if(movedKg!==null && movement.beforeKg>0) share=Math.min(1,movedKg/movement.beforeKg);
@@ -3425,7 +3442,7 @@ function econLedger(){
           if(run[t.to]) run[t.to][cat] += moved; else if(isSale) sold[cat] += moved;
         });
         if(isSale){ soldByPool[t.from] += movedCost; day[t.from].soldCost += movedCost; }
-        movements.push({record:t,date,from:t.from,to:t.to,count:c,kg:movedKg,cost:movedCost,share,beforeKg:avg*before,estimated:batch.estimated,full,adjustment:full?c-before:0});
+        movements.push({record:t,date,from:t.from,to:t.to,count:c,kg:movedKg,cost:movedCost,share,beforeKg:movement.beforeKg,estimated:movement.estimated,full,adjustment:movement.adjustment});
       });
       POOLS.forEach(p=>{
         const n = num(P.byDate[date] && P.byDate[date][p]);
@@ -4482,12 +4499,12 @@ function buildWorkbook_stocking(){
 
 function buildWorkbook_transfers(){
   const rows=Object.values(state.transfers).sort((a,b)=>(a.date||'').localeCompare(b.date||'') || num(a.createdAt)-num(b.createdAt));
-  const aoa=[['Дата','Из бассейна','В бассейн / продажа','Количество, шт. (оценка)','Навеска, кг','Масса партии, кг','Источник массы','Полная пересадка','Перенесено затрат, руб','Уточнение количества, шт.','Комментарий','Навеска принимающего до пересадки, кг','Биомасса исходного до пересадки, кг','Доля перенесённых затрат']];
+  const aoa=[['Дата','Из бассейна','В бассейн / продажа','Количество, шт. (оценка)','Навеска, кг','Масса партии, кг','Источник массы','Весь бассейн','Перенесено затрат, руб','Уточнение количества, шт.','Комментарий','Навеска принимающего до пересадки, кг','Биомасса исходного до пересадки, кг','Доля перенесённых затрат']];
   const movements=econLedger().movements;
   rows.forEach((r,i)=>{
     const m=movements.find(m=>m.record===r);
     const lw=econLastWeight(r.from,r.date),w=transferMass(r,lw?lw.kg:0);
-    aoa.push([fmtDRaw(r.date),poolLabelRaw(r.from),toPoolLabelRaw(r.to),transferCount(r),r.weight||'',m?m.kg:w.kg,(m?m.estimated:w.estimated)?'расчёт':'взвешено',r.fullTransfer===true?'да':'нет',m?m.cost:'',m&&m.full?m.adjustment:'',r.comment||'',r.destinationWeight||'',m?m.beforeKg:'',m?m.share:'']);
+    aoa.push([fmtDRaw(r.date),poolLabelRaw(r.from),toPoolLabelRaw(r.to),m?m.count:(r.fullSale===true?'':transferCount(r)),r.weight||'',m?m.kg:w.kg,(m?m.estimated:w.estimated)?'расчёт':'взвешено',r.fullSale===true?'продажа всей рыбы':r.fullTransfer===true?'да':'нет',m?m.cost:'',m&&m.full?m.adjustment:'',r.comment||'',r.destinationWeight||'',m?m.beforeKg:'',m?m.share:'']);
   });
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,aoaSheet(aoa),'Пересадки');
   return {wb,filename:'Пересадки.xlsx'};
